@@ -211,7 +211,11 @@ int main(int argc, char** argv) {
   bool flag_folder = false;
   std::string game_name = "jak1";
   std::string decomp_config_override = "{}";
+#if defined(__aarch64__) || defined(_M_ARM64)
+  std::string instr_set_name = "arm64";
+#else
   std::string instr_set_name = "x86";
+#endif
 
   lg::initialize();
 
