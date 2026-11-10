@@ -19,6 +19,7 @@ This repository adapts that work to run on the Nintendo Switch, replacing the up
 
 ## Attribution & Licensing
 
+- **Acknowledgments:** Special thanks to **Pokeko** — this port wouldn't be possible without their invaluable help and contributions.
 - The overwhelming majority of this codebase originates from [open-goal/jak-project](https://github.com/open-goal/jak-project), licensed under the **ISC License** — see [LICENSE](LICENSE).
 - Full attribution for OpenGOAL, devkitPro/libnx, and other third-party libraries can be found in [CREDITS.md](CREDITS.md).
 
