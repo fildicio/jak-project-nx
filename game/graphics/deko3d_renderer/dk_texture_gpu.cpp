@@ -510,6 +510,120 @@ uint32_t upload_bcn(dktex::Fmt fmt, uint32_t w, uint32_t h, const void* src,
   return id;
 }
 
+// AI-assisted: BC1/BC3 texture with the fr3's pre-baked mip chain. `mip_off[i]` is the byte
+// offset of level i inside `base` (total `size` bytes). Levels are used while they are at least
+// 4x4 (smaller BC levels are skipped: the sampler clamps to the last level) and fit in `size`.
+uint32_t upload_bcn_mipped(dktex::Fmt fmt, uint32_t w, uint32_t h, const uint8_t* base,
+                           uint32_t size, const uint32_t* mip_off, uint32_t mip_n) {
+  if (!on_owner_thread("upload_bcn_mipped")) {
+    return 0;
+  }
+  DkImageFormat layoutFmt;
+  uint32_t blockBytes;
+  switch (fmt) {
+    case dktex::Fmt::Bc1:
+      layoutFmt = DkImageFormat_RGB_BC1;
+      blockBytes = 8;
+      break;
+    case dktex::Fmt::Bc3:
+      layoutFmt = DkImageFormat_RGBA_BC3;
+      blockBytes = 16;
+      break;
+    default:
+      return 0;
+  }
+  uint32_t lvl_w[16], lvl_h[16], lvl_bytes[16];
+  uint32_t levels = 0;
+  for (uint32_t i = 0; i < mip_n && i < 16; i++) {
+    const uint32_t lw = std::max(1u, w >> i), lh = std::max(1u, h >> i);
+    if (i > 0 && (lw < 4 || lh < 4)) {
+      break;
+    }
+    const uint64_t b = (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes;
+    if ((uint64_t)mip_off[i] + b > size || b > 512u * 1024u * 4u) {
+      break;
+    }
+    lvl_w[i] = lw;
+    lvl_h[i] = lh;
+    lvl_bytes[i] = (uint32_t)b;
+    levels++;
+  }
+  if (levels == 0) {
+    return 0;
+  }
+  uint32_t id = s_store.alloc(dktex::Entry{(uint16_t)w, (uint16_t)h, (uint8_t)levels, fmt, 1});
+  if (id == 0) {
+    return 0;
+  }
+  const uint32_t slot = s_store.slot_of(id);
+  DkImageLayoutMaker mk;
+  DkImageLayout layout;
+  dkImageLayoutMakerDefaults(&mk, dkdev::device_handle());
+  mk.type = DkImageType_2D;
+  mk.dimensions[0] = w;
+  mk.dimensions[1] = h;
+  mk.dimensions[2] = 1;
+  mk.mipLevels = levels;
+  mk.format = layoutFmt;
+  mk.flags = 0;
+  dkImageLayoutInitialize(&layout, &mk);
+  const uint64_t size_ = dkImageLayoutGetSize(&layout);
+  const uint32_t align_ = dkImageLayoutGetAlignment(&layout);
+  uint64_t off = 0;
+  if (!img_alloc_range(size_, align_, &off)) {
+    s_bumpFails++;
+    switch_run_logf("[dk] tex pool full (%llu MB carved, %llu KB free in holes)",
+                    (unsigned long long)(s_cursor / 1048576),
+                    (unsigned long long)(s_freedBytes / 1024));
+    s_store.release(id);
+    return 0;
+  }
+  s_slotOff[slot] = off;
+  s_slotSize[slot] = size_;
+  dkImageInitialize(&s_images[slot], &layout, s_imgMem, (uint32_t)off);
+  DkImageView view;
+  dkImageViewDefaults(&view, &s_images[slot]);
+  DkImageDescriptor desc;
+  dkImageDescriptorInitialize(&desc, &view, false, false);
+  memcpy(dkdev::data_cpu() + dkdev::desc_off() + 0x100 + slot * dkdev::desc_slot_stride(),
+         &desc, sizeof(desc));
+
+  constexpr uint64_t kStaging = 512 * 1024 * 4;
+  uint8_t* st = dkdev::staging_cpu();
+  bool ok = true;
+  uint32_t i = 0;
+  while (i < levels && ok) {
+    DkCmdBuf cmd = dkdev::cmd_handle();
+    dkCmdBufClear(cmd);
+    dkCmdBufAddMemory(cmd, dkdev::data_mem(), dkdev::upload_cmd_off(), dkdev::upload_cmd_size());
+    uint64_t cur = 0;
+    while (i < levels) {
+      const uint64_t bytes = lvl_bytes[i];
+      if (cur + bytes > kStaging) {
+        break;  // level 0 alone always fits (checked above)
+      }
+      memcpy(st + cur, base + mip_off[i], bytes);
+      DkImageView lv;
+      dkImageViewDefaults(&lv, &s_images[slot]);
+      lv.mipLevelOffset = (uint8_t)i;
+      lv.mipLevelCount = 1;
+      const DkCopyBuf cp = {dkdev::staging_gpu() + cur, 0, 0};
+      const DkImageRect rc = {0, 0, 0, lvl_w[i], lvl_h[i], 1};
+      dkCmdBufCopyBufferToImage(cmd, &cp, &lv, &rc, 0);
+      cur += (bytes + 255) & ~255ull;
+      i++;
+    }
+    ok = dkdev::submit_upload_cmds(dkCmdBufFinishList(cmd));
+  }
+  if (!ok) {
+    img_free_range(off, size_);
+    s_slotSize[slot] = 0;
+    s_store.release(id);
+    return 0;
+  }
+  return id;
+}
+
 bool add_level_ref(uint32_t id) {
   if (!on_owner_thread("add_level_ref")) {
     return false;

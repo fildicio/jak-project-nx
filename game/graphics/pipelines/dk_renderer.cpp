@@ -608,6 +608,10 @@ static void prof_report() {
 // (kJak2NativeSplits), then the pmode_alp blackout. Still dkgl-only/inert: shadow2, warp,
 // particles, tfrag WATER, alpha ties (phase 2/3).
 void record_jak2_dkgl(int fb_w, int fb_h) {
+  // AI-assisted: record the staged tod-palette copies (and sky uploads) into THIS frame, like
+  // record_tfrag_and_shrub does. Without it begin_deferred_frame() pushed them with a blocking
+  // submit every frame (3-5 ms of CPU wait on jak2).
+  dktexgpu::record_deferred_updates();
   dkgl::set_frame_size(fb_w, fb_h);
   int next_split = 0;
   int unit = 0;
@@ -1005,6 +1009,12 @@ void DkDisplay::render() {
       g_dk->frame_idx_of_input_data = g_dk->frame_idx;
     }
     std::unique_lock<std::mutex> lock(g_dk->dma_mutex);
+    if (s_dk_jak2_dkgl && s_dk_jak2_world) {
+      // AI-assisted: new deferred-copy staging slot BEFORE the capture stages this frame's
+      // texture-anim / sky copies (they used to be flushed with a blocking submit when the
+      // build called begin_deferred_frame later: 3-5 ms/frame). World recorder records them.
+      dktexgpu::begin_deferred_frame();
+    }
     dk_drain_tex_ops();  // T80: before any capture looks textures up
     if (s_dk_tfrag) {
       // T60: read the chain BEFORE the ack below -- after it the EE rewrites that memory.
@@ -1213,7 +1223,7 @@ void DkDisplay::render() {
       m_st.build_pass[pass] += dk_ms(tp, now);
       tp = now;
     };
-    dktexgpu::begin_deferred_frame();  // tod palettes + sky uploads reuse the frame cmds
+    // begin_deferred_frame() runs at capture start (see above)
     dktf::build_frame(s_dk_loader.get());
     lap2(kPTfrag);
     dktie::build_frame(s_dk_loader.get());

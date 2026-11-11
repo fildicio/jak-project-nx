@@ -1349,7 +1349,10 @@ FrameTiming present_frame(bool show_splash) {
   // Phase 1 draws no game frames yet. A slow dark-blue pulse instead of plain black makes
   // "alive, not frozen" visible on the console at a glance.
   const float pulse = 0.04f + 0.04f * (float)((s_frame / 2) % 60) / 59.0f;
-  dkCmdBufClearColorFloat(s_cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, pulse, 1.0f);
+  // AI-assisted: with the splash on screen the bars around the centred image must be pure black
+  // (the blue pulse is only for the "alive" indicator when nothing else is shown).
+  const float bg = (s_have_splash && show_splash) ? 0.0f : pulse;
+  dkCmdBufClearColorFloat(s_cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, bg, 1.0f);
   if (world) {
     // GL clears depth to 0 and draws with GEQUAL/GREATER (OpenGLRenderer.cpp glClearDepthf(0)).
     dkCmdBufClearDepthStencil(s_cmd, true, 0.0f, 0xFF, 0);

@@ -6,7 +6,12 @@
 #if defined(__SWITCH__) || defined(DK_HOST_REPLAY)
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstring>
+#if defined(__SWITCH__)
+#include <unistd.h>
+#endif
 #include <unordered_map>
 #include <vector>
 
@@ -87,6 +92,136 @@ struct IdxSlot {
   uint32_t used = 0;
   uint32_t want = 0;
 };
+// AI-assisted: shrubs have no visibility structure in the fr3 ("todo some visibility structure"),
+// so the GL path draws every shrub of the level every frame. Here each draw's strips are sorted
+// spatially (Morton order of the strip centres) at first use and grouped into chunks of ~kChunkIdx
+// indices with a bounding sphere; per frame only chunks whose sphere is inside the frustum are
+// copied into the index ring. Flag sdmc:/gk_noshrubcull.txt draws every chunk (old behaviour).
+struct ShrubChunk {
+  uint32_t begin = 0;  // into TreeIdxCache::sorted
+  uint32_t count = 0;
+  math::Vector4f sphere;
+};
+struct TreeIdxCache {
+  uint64_t load_id = ~0ull;
+  std::vector<u32> sorted;  // strips regrouped by chunk, each strip ends with a restart index
+  std::vector<std::vector<ShrubChunk>> chunks;  // per draw
+};
+constexpr uint32_t kChunkIdx = 600;
+constexpr u32 kRestart = 0xFFFFFFFFu;
+
+bool shrub_cull_enabled() {
+#if defined(__SWITCH__)
+  static const bool s_on = access("sdmc:/gk_noshrubcull.txt", F_OK) != 0;
+  return s_on;
+#else
+  return true;
+#endif
+}
+
+uint32_t morton3(uint32_t x, uint32_t y, uint32_t z) {
+  auto spread = [](uint32_t v) {
+    v &= 0x3ff;
+    v = (v | (v << 16)) & 0x030000ff;
+    v = (v | (v << 8)) & 0x0300f00f;
+    v = (v | (v << 4)) & 0x030c30c3;
+    v = (v | (v << 2)) & 0x09249249;
+    return v;
+  };
+  return spread(x) | (spread(y) << 1) | (spread(z) << 2);
+}
+
+void build_shrub_chunks(const tfrag3::ShrubTree& tree, TreeIdxCache* out) {
+  struct Strip {
+    uint32_t start, len;
+    float mn[3], mx[3];
+    uint32_t key;
+  };
+  const auto& verts = tree.unpacked.vertices;
+  out->sorted.clear();
+  out->chunks.assign(tree.static_draws.size(), {});
+  out->sorted.reserve(tree.indices.size() + tree.indices.size() / 8);
+  std::vector<Strip> strips;
+  for (size_t di = 0; di < tree.static_draws.size(); di++) {
+    const auto& d = tree.static_draws[di];
+    const u32* in = tree.indices.data() + d.first_index_index;
+    const uint32_t n = d.num_indices;
+    strips.clear();
+    bool bad = false;
+    float gmn[3] = {1e30f, 1e30f, 1e30f}, gmx[3] = {-1e30f, -1e30f, -1e30f};
+    for (uint32_t i = 0; i < n && !bad;) {
+      if (in[i] == kRestart) {
+        i++;
+        continue;
+      }
+      Strip st{i, 0, {1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, 0};
+      while (i < n && in[i] != kRestart) {
+        if (in[i] >= verts.size()) {
+          bad = true;
+          break;
+        }
+        const auto& v = verts[in[i]];
+        const float p[3] = {v.x, v.y, v.z};
+        for (int c = 0; c < 3; c++) {
+          st.mn[c] = std::min(st.mn[c], p[c]);
+          st.mx[c] = std::max(st.mx[c], p[c]);
+        }
+        i++;
+      }
+      st.len = i - st.start;
+      for (int c = 0; c < 3; c++) {
+        gmn[c] = std::min(gmn[c], 0.5f * (st.mn[c] + st.mx[c]));
+        gmx[c] = std::max(gmx[c], 0.5f * (st.mn[c] + st.mx[c]));
+      }
+      strips.push_back(st);
+    }
+    auto& dc = out->chunks[di];
+    if (bad || strips.empty()) {
+      // unknown geometry: copy the draw as it is, one chunk that is always visible
+      ShrubChunk c;
+      c.begin = (uint32_t)out->sorted.size();
+      out->sorted.insert(out->sorted.end(), in, in + n);
+      c.count = n;
+      c.sphere = math::Vector4f(0.f, 0.f, 0.f, 1e30f);
+      dc.push_back(c);
+      continue;
+    }
+    for (auto& st : strips) {
+      uint32_t q[3];
+      for (int c = 0; c < 3; c++) {
+        const float span = std::max(gmx[c] - gmn[c], 1.f);
+        const float t = (0.5f * (st.mn[c] + st.mx[c]) - gmn[c]) / span;
+        q[c] = (uint32_t)std::min(1023.f, std::max(0.f, t * 1023.f));
+      }
+      st.key = morton3(q[0], q[1], q[2]);
+    }
+    std::sort(strips.begin(), strips.end(),
+              [](const Strip& a, const Strip& b) { return a.key < b.key; });
+    size_t k = 0;
+    while (k < strips.size()) {
+      ShrubChunk c;
+      c.begin = (uint32_t)out->sorted.size();
+      float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+      while (k < strips.size() && (c.count == 0 || c.count < kChunkIdx)) {
+        const Strip& st = strips[k++];
+        out->sorted.insert(out->sorted.end(), in + st.start, in + st.start + st.len);
+        out->sorted.push_back(kRestart);
+        c.count += st.len + 1;
+        for (int a = 0; a < 3; a++) {
+          mn[a] = std::min(mn[a], st.mn[a]);
+          mx[a] = std::max(mx[a], st.mx[a]);
+        }
+      }
+      const float cx = 0.5f * (mn[0] + mx[0]), cy = 0.5f * (mn[1] + mx[1]),
+                  cz = 0.5f * (mn[2] + mx[2]);
+      const float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+      // small padding: the vertex shader may displace nothing, but be safe against rounding
+      c.sphere = math::Vector4f(cx, cy, cz, 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * 1.02f + 16.f);
+      dc.push_back(c);
+    }
+  }
+}
+std::unordered_map<const void*, TreeIdxCache> s_tree_idx;
 IdxSlot s_idx[kIdxSlots];
 uint32_t s_build = 0;
 
@@ -258,12 +393,38 @@ void build_frame(Loader* loader) {
       if (tod == 0) {
         continue;
       }
-      groups.resize(tree.static_draws.size());
-      if (idx.size() < tree.indices.size()) {  // T86: grow only (no per-tree zero-fill)
-        idx.resize(tree.indices.size());
+      TreeIdxCache& ic = s_tree_idx[&tree];
+      if (ic.load_id != ld->load_id || ic.chunks.size() != tree.static_draws.size()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        build_shrub_chunks(tree, &ic);
+        ic.load_id = ld->load_id;
+        size_t nch = 0;
+        for (const auto& dc : ic.chunks) {
+          nch += dc.size();
+        }
+        switch_run_logf("[dk] shrub chunks: %zu draws, %zu chunks, %zu idx, built in %.1f ms",
+                        tree.static_draws.size(), nch, ic.sorted.size(),
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count());
       }
-      const u32 n = make_all_visible_index_list(groups.data(), idx.data(), tree.static_draws,
-                                                tree.indices.data());
+      const bool cull = s_jak2 && shrub_cull_enabled();  // jak1 keeps drawing every chunk
+      groups.resize(tree.static_draws.size());
+      if (idx.size() < ic.sorted.size()) {
+        idx.resize(ic.sorted.size());
+      }
+      u32 n = 0;
+      for (size_t di = 0; di < tree.static_draws.size(); di++) {
+        const uint32_t first = n;
+        for (const ShrubChunk& c : ic.chunks[di]) {
+          if (!cull || sphere_in_view_ref(c.sphere, cam.planes)) {
+            memcpy(&idx[n], &ic.sorted[c.begin], c.count * sizeof(u32));
+            n += c.count;
+          }
+        }
+        groups[di] = {(int)first, (int)(n - first)};
+      }
+      const auto& gr = groups;
       const uint32_t bytes = n * 4;
       ring->want += bytes;
       if (!ring->pb.ok() || ring->used + bytes > ring->pb.capacity) {
@@ -280,7 +441,7 @@ void build_frame(Loader* loader) {
       }
 
       for (size_t i = 0; i < tree.static_draws.size(); i++) {
-        if (groups[i].second == 0) {
+        if (gr[i].second == 0) {
           continue;
         }
         const u16 proto = tree.static_draws[i].proto_idx;
@@ -295,8 +456,8 @@ void build_frame(Loader* loader) {
         dktf::DrawCmd c;
         c.vert_gpu = vb->gpu;
         c.vert_bytes = vb->capacity;
-        c.idx_gpu = ring->pb.gpu + base + (uint64_t)groups[i].first * 4;
-        c.idx_count = (uint32_t)groups[i].second;
+        c.idx_gpu = ring->pb.gpu + base + (uint64_t)gr[i].first * 4;
+        c.idx_count = (uint32_t)gr[i].second;
         if (draw.tree_tex_id < ld->textures.size()) {
           c.tex_id = ld->textures[draw.tree_tex_id];
         }

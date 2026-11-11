@@ -39,6 +39,7 @@
 #include "game/graphics/opengl_renderer/DirectRenderer.h"  // jak2 sky-draw / screen-filter / debug2
 #include "game/graphics/opengl_renderer/ProgressRenderer.h"  // jak2 progress 320 (loading bars + minimap)
 #include "game/graphics/opengl_renderer/Shader.h"
+#include "game/graphics/opengl_renderer/TextureUploadHandler.h"
 #include "game/graphics/opengl_renderer/Warp.h"  // T128: jak2 gmerc-warp 317
 #include "game/graphics/opengl_renderer/ShadowRenderer.h"
 #include "game/graphics/opengl_renderer/foreground/Shadow2.h"  // §7.2 phase 2
@@ -300,6 +301,7 @@ constexpr int kJak2Buckets[] = {
     (int)jak2::BucketId::OCEAN_NEAR,      (int)jak2::BucketId::SHADOW2,  // §7.2 phase 2
     (int)jak2::BucketId::EFFECTS,
     (int)jak2::BucketId::GMERC_WARP,  // T128
+    (int)jak2::BucketId::DEBUG_NO_ZBUF1,  // 318: boot logo (GL TextureUploadHandler + direct)
     (int)jak2::BucketId::PROGRESS,    // §7.2 phase 2: menus (loading bars + pause minimap)
     (int)jak2::BucketId::SCREEN_FILTER,
     (int)jak2::BucketId::DEBUG2,      // §7.2 phase 2: menus + HUD text (jak1 debug 67 equiv)
@@ -837,6 +839,7 @@ std::unique_ptr<DirectRenderer> s_screen_filter;  // §7.2 phase 1: jak2 bucket 
 // debug-no-zbuf2 325, debug3 326).
 std::unique_ptr<ProgressRenderer> s_progress;     // loading bars + pause-menu minimap
 std::unique_ptr<DirectRenderer> s_debug2;         // menus + HUD text
+std::unique_ptr<TextureUploadHandler> s_debug_no_zbuf1;  // 318: Dolby logo + black box
 std::unique_ptr<DirectRenderer> s_debug_no_zbuf2;
 std::unique_ptr<DirectRenderer> s_debug3;
 std::unique_ptr<Warp> s_warp;  // T128: jak2 gmerc-warp 317
@@ -1456,6 +1459,12 @@ bool init_jak2(TexturePool* pool, Loader* loader, int loaded) {
   // 318, tex-all-map 319, subtitle 322) stay on the native 47-bucket sprite walk.
   // A/B flag: gk_dkgl_nomenu.txt.
   if (!flag("gk_dkgl_nomenu.txt")) {
+    // AI-assisted: bucket 318 draws the boot (Dolby) logo + black box on PC; dkgl only replayed its
+    // uploads. Same GL handler, uploads off (the native walk does them).
+    s_debug_no_zbuf1 = std::make_unique<TextureUploadHandler>(
+        "debug-no-zbuf1", (int)jak2::BucketId::DEBUG_NO_ZBUF1, nullptr, true);
+    s_debug_no_zbuf1->set_fake_uploads(true);
+    s_renderers[list_index((int)jak2::BucketId::DEBUG_NO_ZBUF1)] = s_debug_no_zbuf1.get();
     s_progress =
         std::make_unique<ProgressRenderer>("progress", (int)jak2::BucketId::PROGRESS, 0x1000);
     s_progress->init_shaders(s_srs->shaders);

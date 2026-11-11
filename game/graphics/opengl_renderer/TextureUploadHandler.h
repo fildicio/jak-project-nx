@@ -19,6 +19,7 @@ class TextureUploadHandler : public BucketRenderer {
   void render(DmaFollower& dma, SharedRenderState* render_state, ScopedProfilerNode& prof) override;
   void draw_debug_window() override;
   bool empty() const override;
+  void set_fake_uploads(bool v) { m_fake_uploads = v; }  // dkgl: uploads done by the native walk
 
  private:
   struct TextureUpload {

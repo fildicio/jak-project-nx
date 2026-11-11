@@ -9,6 +9,7 @@
 #endif
 
 #include "LoaderStages.h"
+#include "game/runtime.h"  // g_game_version (jak2-only dk BCn path)
 
 #include "Loader.h"
 
@@ -744,6 +745,12 @@ void decode_level_bcn_to_rgba(tfrag3::Level& level) {
   if (s_disabled) {
     return;
   }
+  // AI-assisted: on the deko3d path BCn goes to the GPU compressed (dktexgpu::upload_bcn,
+  // 4-8x less memory). Decoding to RGBA8 here filled the 96 MB image pool on big levels
+  // (Atoll: "tex pool full", ground/grass textures refused -> drawn untextured).
+  if (dkdev::is_up() && g_game_version == GameVersion::Jak2) {
+    return;
+  }
   Timer t;
   int n = 0;
   for (auto& tex : level.textures) {
@@ -1017,10 +1024,28 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
       // "skip" and is already logged inside dktexgpu — do not log again.
       dk_tex = dktexgpu::upload_rgba8_mipped(tex.w, tex.h, tex.data.data());  // T88
     } else {
-      static bool s_bcn_reported = false;
-      if (!s_bcn_reported) {
-        s_bcn_reported = true;
-        fmt::print("[dk] loader tex: BCn deferred (later P2.3 slice), skipping\n");
+      // AI-assisted: compressed level 0 straight to the GPU (no mips yet). Malformed
+      // payloads are skipped (dk_tex stays 0).
+      const bool is_bc1 = tex.format == tfrag3::TEXTURE_FMT_BC1;
+      const u64 blocks = u64((tex.w + 3) / 4) * ((tex.h + 3) / 4);
+      const u64 bytes0 = blocks * (is_bc1 ? 8 : 16);
+      if (g_game_version == GameVersion::Jak2 && tex.w != 0 && tex.h != 0 &&
+          !tex.mip_offsets.empty() &&
+          u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
+        dk_tex = dktexgpu::upload_bcn_mipped(
+            is_bc1 ? dktex::Fmt::Bc1 : dktex::Fmt::Bc3, tex.w, tex.h, tex.bcn_data.data(),
+            (uint32_t)tex.bcn_data.size(), tex.mip_offsets.data(), (uint32_t)tex.mip_offsets.size());
+        if (dk_tex == 0) {  // odd mip table: level 0 only
+          dk_tex = dktexgpu::upload_bcn(is_bc1 ? dktex::Fmt::Bc1 : dktex::Fmt::Bc3, tex.w, tex.h,
+                                        tex.bcn_data.data() + tex.mip_offsets[0],
+                                        (uint32_t)bytes0);
+        }
+      } else {
+        static bool s_bcn_reported = false;
+        if (!s_bcn_reported) {
+          s_bcn_reported = true;
+          fmt::print("[dk] loader tex: malformed BCn texture skipped\n");
+        }
       }
     }
     if (tex.load_to_pool) {

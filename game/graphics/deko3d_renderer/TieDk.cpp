@@ -5,6 +5,7 @@
 // DK_HOST_REPLAY: test/test_dk_tie_replay.cpp compiles this file on the Mac.
 #if defined(__SWITCH__) || defined(DK_HOST_REPLAY)
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <cstring>
 #include <string>
@@ -510,7 +511,8 @@ void build_frame(Loader* loader) {
       if (vis.size() < tree.bvh.vis_nodes.size()) {
         vis.resize(tree.bvh.vis_nodes.size());
       }
-      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes, nullptr, vis.data());
+      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes, s_jak2 ? dktf::occlusion_string(b) : nullptr,
+                          vis.data());
       groups.resize(tree.static_draws.size());
       if (idx.size() < tree.unpacked.indices.size()) {  // T86: grow only (no per-tree zero-fill)
         idx.resize(tree.unpacked.indices.size());

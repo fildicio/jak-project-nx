@@ -83,6 +83,9 @@ uint32_t upload_rgba8_mipped(uint32_t w, uint32_t h, const void* src);
 // byte count (ceil(w/4)*ceil(h/4)*blockBytes) are sanity-checked; a mismatch only
 // WARN-logs (the caller's `size` wins).
 uint32_t upload_bcn(dktex::Fmt fmt, uint32_t w, uint32_t h, const void* src, uint32_t size);
+// AI-assisted: BC1/BC3 with the pre-baked mip chain (mip_off[i] = byte offset of level i in base).
+uint32_t upload_bcn_mipped(dktex::Fmt fmt, uint32_t w, uint32_t h, const uint8_t* base,
+                           uint32_t size, const uint32_t* mip_off, uint32_t mip_n);
 
 // Bump the level ref-count of a live texture (the same "second level loads the
 // same tex without re-uploading" semantics as dktex::TextureStore::add_level_ref).

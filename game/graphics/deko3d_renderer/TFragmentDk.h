@@ -115,6 +115,8 @@ void set_golden(std::string* out);
 // Switch: after `frames` frames with tfrag data, write <dir>/dk_replay.dma (that frame's
 // DMA chain) and <dir>/dk_replay.golden.txt (that frame's golden). One shot.
 void arm_replay_dump(const char* dir, int frames);
+// AI-assisted: jak2 occlusion string of the level for this pass (see TFragmentDk.cpp), or nullptr.
+const uint8_t* occlusion_string(int pass);
 
 // deko3d side (dk_tfrag_record.cpp): record frame_draws() into dkdev::cmd_handle().
 // Signature matches dkdev::set_world_recorder.

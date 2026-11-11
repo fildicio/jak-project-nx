@@ -8,6 +8,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#if defined(__SWITCH__)
+#include <unistd.h>
+#endif
 #include <string>
 #include <unordered_map>
 
@@ -495,17 +498,52 @@ void fill_draw_state(DrawMode m, DrawCmd* c) {
 // §7.2 phase 1: jak2 fog source. GL's VisDataHandler (bucket BUCKET_2) takes the fog
 // colour from the vif0 of each level's vis packet, overwriting per level (last wins);
 // jak1 reads it from the default-regs chain behind the CALL head instead (below).
+// AI-assisted: the same packets also carry each level's 128*16 byte occlusion string (GL
+// VisDataHandler copies them into render_state->occlusion_vis[level]); tfrag/tie feed them to
+// cull_check_all_slow. Cleared every frame like GL's reset. Flag sdmc:/gk_noocc.txt turns it off.
+static uint8_t s_occ[6][128 * 16];
+static bool s_occ_valid[6] = {false, false, false, false, false, false};
+static bool occlusion_enabled() {
+#if defined(__SWITCH__)
+  static const bool s_on = access("sdmc:/gk_noocc.txt", F_OK) != 0;
+  return s_on;
+#else
+  return true;
+#endif
+}
+
 static void capture_fog_jak2(const void* data, uint32_t buckets_base) {
+  for (bool& v : s_occ_valid) {
+    v = false;
+  }
   DmaFollower d(data, buckets_base + 16 * (int)jak2::BucketId::BUCKET_2);
   d.read_and_advance();  // the bucket's own NEXT (size 0)
-  for (int guard = 0; guard < 16 && !d.ended(); guard++) {
+  for (int i = 0; i < 6 && !d.ended(); i++) {
     auto p = d.read_and_advance();
     if (p.vifcode1().kind != VifCode::Kind::PC_PORT) {
       break;  // same stop as VisDataHandler::render
     }
     const u32 vif0 = p.vif0();
     memcpy(s_fog, &vif0, 4);
+    if (p.size_bytes == 128 * 16) {
+      memcpy(s_occ[i], p.data, 128 * 16);
+      s_occ_valid[i] = true;
+    }
+    if (d.ended()) {
+      break;
+    }
+    d.read_and_advance();  // size-0 terminator after every vis packet (GL asserts size 0)
   }
+}
+
+// jak2 only: the level's occlusion string for pass `pass` (tfrag normal 0..5, tfrag trans 6..11,
+// tie/shrub 0..5), or nullptr when the game sent none / the flag is off.
+const uint8_t* occlusion_string(int pass) {
+  if (s_passes != kJak2Passes || !occlusion_enabled()) {
+    return nullptr;
+  }
+  const int lvl = pass % 6;
+  return s_occ_valid[lvl] ? s_occ[lvl] : nullptr;
 }
 
 void capture_chain(const void* data, uint32_t start_offset) {
@@ -665,7 +703,7 @@ void build_frame(Loader* loader) {
       if (vis.size() < tree.bvh.vis_nodes.size()) {
         vis.resize(tree.bvh.vis_nodes.size());
       }
-      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes, nullptr, vis.data());
+      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes, dktf::occlusion_string(b), vis.data());
       groups.resize(tree.draws.size());
       if (idx.size() < tree.unpacked.indices.size()) {  // T86: grow only; shrinking then
         idx.resize(tree.unpacked.indices.size());     // regrowing zero-filled MBs per tree

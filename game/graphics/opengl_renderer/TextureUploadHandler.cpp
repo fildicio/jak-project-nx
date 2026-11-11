@@ -48,6 +48,7 @@ void TextureUploadHandler::render(DmaFollower& dma,
         if (m_direct) {
           m_direct->flush_pending(render_state, prof);
         }
+        if (m_texture_animator)
         m_texture_animator->handle_texture_anim_data(dma, (const u8*)render_state->ee_main_memory,
                                                      render_state->texture_pool.get(),
                                                      render_state->frame_idx);
