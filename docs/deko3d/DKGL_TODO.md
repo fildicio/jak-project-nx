@@ -104,6 +104,7 @@ All via dkgl (GL renderer unchanged; dkgl gets the missing program / GL hook / s
 | J | Make deko3d the jak2 default (`gfx.cpp` still needs `gk_dk3d.txt`) | one-line switch after B–H | ⏳ |
 | K | jak2 ocean NEAR (dkgl, bucket 310): close to the camera the sea is a purple/white band (HW 2026-11-08, Haven port + slums canal screenshots); far/mid ocean OK. Not from D (ocean uses no u16 attribs / glTexSubImage2D) | check the OceanTexture wave texture + envmap the near pass samples (`notex 0`, `inert 5` in the log). **HW 2026-11-11 (user): no purple band any more** (probably the PR #9 BCn/texture fixes) | ✅ HW 2026-11-11 (user) |
 | L | jak2 dark eco clusters are plain magenta dots (no bright core / glow), HW 2026-11-08 Dead Town screenshots | check the GlowRenderer (T126) + sprite3 path for those sprites | ⏳ |
+| M | jak2 turret/cannon hit on Jak: two tilted squares, solid green inside with a pale frame (HW 2026-11-12 20:13:29 screenshot, city). Wrong texture, not alpha: glow off (`gk_dkgl_noglow.txt`), sprite3 frag shader = GL, tex `fail=0`. Jak's own guns are fine | build `3b6c9cdf` (commit a26d1431f) logs `[sprtex] tbp id slot WxH common name` once per pairing: get hit by the turret, then read the line for that sprite. Right name -> the id/image is wrong; wrong name -> the tbp lookup is wrong. Then try `gk_dkgl_nodistort.txt` | ⏳ bug, parked by user |
 
 ### 7.1 Reusable as-is (native or dkgl, already validated on jak1 — jak2 shares the code)
 
