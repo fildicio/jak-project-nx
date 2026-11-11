@@ -1726,6 +1726,19 @@ void TextureAnimator::handle_clouds_and_fog(const DmaTransfer& tf,
   memcpy(&input, tf.data, sizeof(SkyInput));
   auto& gpu_tex = hires ? m_sky_hires_pool_gpu_tex : m_sky_pool_gpu_tex;
 #if defined(__SWITCH__)
+  // jak2 sky (AI-assisted): the cloud composites draw blue square lines under dkgl and cost
+  // ~2 ms GPU/frame. Off by default: the level's static cloud texture stays at cloud_dest
+  // (the sky gradient, tbp 128, is still published). gk_dkgl_clouds.txt turns them on.
+  static const bool s_clouds_on = [] {
+    FILE* f = std::fopen("sdmc:/switch/jak2/gk_dkgl_clouds.txt", "r");
+    if (f) {
+      std::fclose(f);
+    }
+    return f != nullptr;
+  }();
+  if (m_version == GameVersion::Jak2 && !s_clouds_on) {
+    return;
+  }
   // FIX 93 (AI-assisted): rebuild the cloud texture every OTHER frame. The f91 city capture
   // had the sky-pre bucket at 2.4 ms/frame on a render thread with no slack; clouds drift
   // slowly enough that a 15 Hz refresh at 30 fps is not visible. On skipped frames the
