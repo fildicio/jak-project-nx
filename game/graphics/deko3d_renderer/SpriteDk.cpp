@@ -127,11 +127,15 @@ void do_block(uint16_t mode, uint32_t count, const SpriteVecData2d* vec, const A
       s_stats.capped++;
       continue;
     }
-    const uint64_t key = ((uint64_t)s_tbp << 32) | s_mode.as_int();
+    // AI-assisted: key on the texture resolved NOW, not on the tbp. The game reloads the same
+    // tbp with other textures later in the bucket; a tbp key reused the first texture for
+    // them (green picture boxes on cannon/gun particles).
+    const uint32_t tex_id = s_lookup ? s_lookup(s_tbp) : 0;
+    const uint64_t key = ((uint64_t)tex_id << 32) | s_mode.as_int();
     auto it = s_buckets.find(key);
     if (it == s_buckets.end()) {
       it = s_buckets.emplace(key, Bucket()).first;
-      it->second.tex_id = s_lookup ? s_lookup(s_tbp) : 0;  // resolved now: VRAM is reused later
+      it->second.tex_id = tex_id;
       s_bucket_order.push_back(key);
     }
     const uint32_t v0 = (uint32_t)s_verts.size();
