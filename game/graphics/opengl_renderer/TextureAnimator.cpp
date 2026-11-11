@@ -1726,27 +1726,26 @@ void TextureAnimator::handle_clouds_and_fog(const DmaTransfer& tf,
   memcpy(&input, tf.data, sizeof(SkyInput));
   auto& gpu_tex = hires ? m_sky_hires_pool_gpu_tex : m_sky_pool_gpu_tex;
 #if defined(__SWITCH__)
-  // jak2 sky (AI-assisted): the cloud composites draw blue square lines under dkgl and cost
-  // ~2 ms GPU/frame. Off by default: the level's static cloud texture stays at cloud_dest
-  // (the sky gradient, tbp 128, is still published). gk_dkgl_clouds.txt turns them on.
-  static const bool s_clouds_on = [] {
-    FILE* f = std::fopen("sdmc:/switch/jak2/gk_dkgl_clouds.txt", "r");
+  // jak2 sky (AI-assisted): clouds on (the square lines were the noise wrap mode, fixed in
+  // update_opengl_noise_texture). Without them the sky samples the level's raw static
+  // texture (diagonal streaks). gk_dkgl_noclouds.txt turns them off for A/B.
+  static const bool s_clouds_off = [] {
+    FILE* f = std::fopen("sdmc:/switch/jak2/gk_dkgl_noclouds.txt", "r");
     if (f) {
       std::fclose(f);
     }
     return f != nullptr;
   }();
-  if (m_version == GameVersion::Jak2 && !s_clouds_on) {
+  if (m_version == GameVersion::Jak2 && s_clouds_off) {
     return;
   }
-  // FIX 93 (AI-assisted): rebuild the cloud texture every OTHER frame. The f91 city capture
-  // had the sky-pre bucket at 2.4 ms/frame on a render thread with no slack; clouds drift
-  // slowly enough that a 15 Hz refresh at 30 fps is not visible. On skipped frames the
-  // previous texture stays bound at cloud_dest. The noise-layer wrap detection is unaffected:
-  // last_time is only updated on frames that actually run.
-  static bool s_skip_clouds[2] = {false, false};
-  bool& skip = s_skip_clouds[hires ? 1 : 0];
-  skip = !skip;
+  // FIX 93 (AI-assisted): rebuild the cloud texture every 4th frame (was every other). Clouds
+  // drift slowly enough that a 15 Hz refresh at 60 fps is not visible, and this saves GPU time.
+  // On skipped frames the previous texture stays bound at cloud_dest. The noise-layer wrap
+  // detection is unaffected: last_time is only updated on frames that actually run.
+  static u32 s_cloud_frame[2] = {0, 0};
+  u32& frame = s_cloud_frame[hires ? 1 : 0];
+  const bool skip = (frame++ & 3) != 0;
   if (skip && gpu_tex) {
     texture_pool->move_existing_to_vram(gpu_tex, input.cloud_dest);
     return;
@@ -2883,6 +2882,13 @@ int update_opengl_noise_texture(GLuint texture,
   glBindTexture(GL_TEXTURE_2D, texture);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, dim, dim, 0, GL_RED, GL_UNSIGNED_BYTE, temp);
   glGenerateMipmap(GL_TEXTURE_2D);
+#if defined(__SWITCH__)
+  // jak2 sky (AI-assisted): desktop GL relies on the default REPEAT wrap here, so the noise
+  // blends across its edges and the cloud texture tiles seamlessly on the sky. dkgl textures
+  // default to CLAMP_TO_EDGE, which left a seam at every tile edge (the blue square lines).
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+#endif
   return ret;
 }
 

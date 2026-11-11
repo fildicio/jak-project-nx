@@ -20,9 +20,19 @@
 #include <atomic>
 
 #include "game/switch/platform.h"
+#include "game/switch/run_log.h"
 #endif
 
 namespace snd {
+
+#ifdef __SWITCH__
+// Audio dropout probe (AI-assisted): why do some sounds (Dark Jak punches) not play?
+// Counts per 10 s window, written to gk_run_log.txt by the audio thread. Only touched
+// under mTickLock, so plain ints are enough.
+namespace {
+int s_aud_plays = 0, s_aud_nobank = 0, s_aud_nohandler = 0, s_aud_limit = 0;
+}  // namespace
+#endif
 
 u8 g_global_excite = 0;
 
@@ -148,6 +158,16 @@ void Player::Tick(s16Output* stream, int samples) {
     if (stick == 48000) {
       // fmt::print("{} handlers active\n", m_handlers.size());
       stick = 0;
+#ifdef __SWITCH__
+      static int s_secs = 0;
+      if (++s_secs == 10) {
+        s_secs = 0;
+        switch_run_logf("[aud] 10s plays %d nobank %d nohandler %d limit %d | live %d",
+                        s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit,
+                        (int)mHandlers.size());
+        s_aud_plays = s_aud_nobank = s_aud_nohandler = s_aud_limit = 0;
+      }
+#endif
     }
 
     stick++;
@@ -159,7 +179,13 @@ void Player::Tick(s16Output* stream, int samples) {
 u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm, s32 pb) {
   std::scoped_lock lock(mTickLock);
   auto bank = mLoader.GetBankByHandle(bank_id);
+#ifdef __SWITCH__
+  s_aud_plays++;
+#endif
   if (bank == nullptr) {
+#ifdef __SWITCH__
+    s_aud_nobank++;
+#endif
     lg::error("play_sound: Bank {} does not exist", static_cast<void*>(bank_id));
     return 0;
   }
@@ -167,11 +193,17 @@ u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm
   u32 handle = mHandleAllocator.GetId();
   auto handler = bank->MakeHandler(mVmanager, sound_id, vol, pan, pm, pb, GetTick(), handle);
   if (!handler.has_value()) {
+#ifdef __SWITCH__
+    s_aud_nohandler++;
+#endif
     return 0;
   }
 
   auto handler_to_stop = handler.value()->CheckInstanceLimit(mHandlers, vol, true);
   if (handler_to_stop) {
+#ifdef __SWITCH__
+    s_aud_limit++;
+#endif
     handler_to_stop->Stop();
     if (handler_to_stop == handler.value().get()) {
       return 0;
@@ -328,6 +360,9 @@ void Player::UnloadBank(BankHandle bank_handle) {
   }
   if (stopped_live) {
     fmt::print("[aud] FIX 96 bank unload stopped {} live sound handler(s)\n", stopped_live);
+#ifdef __SWITCH__
+    switch_run_logf("[aud] bank unload stopped %u live sound(s)", stopped_live);
+#endif
   }
 
   mLoader.UnloadBank(bank_handle);
