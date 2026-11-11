@@ -611,10 +611,13 @@ void record_jak2_dkgl(int fb_w, int fb_h) {
   // AI-assisted: record the staged tod-palette copies (and sky uploads) into THIS frame, like
   // record_tfrag_and_shrub does. Without it begin_deferred_frame() pushed them with a blocking
   // submit every frame (3-5 ms of CPU wait on jak2).
+  int unit = 0;
+  // perf (AI-assisted): own profiler unit "b9999" for these copies, so their GPU time is not
+  // billed to the first bucket (sky b5 showed a constant ~3 ms).
+  prof_unit(unit, 9999);
   dktexgpu::record_deferred_updates();
   dkgl::set_frame_size(fb_w, fb_h);
   int next_split = 0;
-  int unit = 0;
   auto flush_natives = [&](int before_bucket) {
     // every native whose bucket id comes before the next dkgl bucket records first
     while (s_dk_jak2_world && next_split < kJak2SplitCount &&
