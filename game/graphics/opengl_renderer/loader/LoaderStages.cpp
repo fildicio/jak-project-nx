@@ -1029,7 +1029,23 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
       const bool is_bc1 = tex.format == tfrag3::TEXTURE_FMT_BC1;
       const u64 blocks = u64((tex.w + 3) / 4) * ((tex.h + 3) / 4);
       const u64 bytes0 = blocks * (is_bc1 ? 8 : 16);
-      if (g_game_version == GameVersion::Jak2 && tex.w != 0 && tex.h != 0 &&
+      if (g_game_version == GameVersion::Jak2 && tex.h == 32 && tex.w >= 32 &&
+          !tex.mip_offsets.empty() &&
+          u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
+        // AI-assisted (jak2 mountain checkerboard, HW 2026-11-11): deko3d 0.5.0 mis-handles
+        // block-compressed images exactly 32 px tall and >= 32 px wide (32x32, 64x32, 128x32:
+        // the GPU samples them as black/white blocks, and the mip chain overwrites level 0).
+        // Every other size verified OK. Decode these few small textures to RGBA8 instead.
+        static bool s_rgba_reported = false;
+        if (!s_rgba_reported) {
+          s_rgba_reported = true;
+          fmt::print("[dk] loader: BCn textures 32 px tall decoded to RGBA8 (deko3d layout bug)\n");
+        }
+        std::vector<u32> rgba((size_t)tex.w * tex.h);
+        fix89_decode_bcn_mip(tex.bcn_data.data() + tex.mip_offsets[0], tex.w, tex.h, is_bc1,
+                             rgba.data());
+        dk_tex = dktexgpu::upload_rgba8_mipped(tex.w, tex.h, rgba.data());
+      } else if (g_game_version == GameVersion::Jak2 && tex.w != 0 && tex.h != 0 &&
           !tex.mip_offsets.empty() &&
           u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
         dk_tex = dktexgpu::upload_bcn_mipped(

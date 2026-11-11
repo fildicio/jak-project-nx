@@ -857,9 +857,36 @@ static bool s_net_send_all(int fd, const unsigned char* p, size_t n) {
   return true;
 }
 
+// No wifi log host (normal hbmenu launch): write the frame to the SD card instead, same GKFR
+// header + raw RGBA as the TCP stream. Pull it over FTP, convert with tools/gkfr2png.py --flip.
+// (AI-assisted)
+static void s_sd_write_frame(unsigned w, unsigned h, const void* rgba) {
+  static unsigned s_sd_grab_n = 0;
+  char path[64];
+  snprintf(path, sizeof(path), "sdmc:/switch/jak2/dk_grab_%03u.gkfr", s_sd_grab_n++);
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    switch_run_logf("[grab] open %s failed errno=%d", path, errno);
+    return;
+  }
+  unsigned char hdr[16] = {'G', 'K', 'F', 'R', 1, 0, 0, 0};
+  for (int i = 0; i < 4; i++) {
+    hdr[8 + i] = (unsigned char)((w >> (8 * i)) & 0xFF);
+    hdr[12 + i] = (unsigned char)((h >> (8 * i)) & 0xFF);
+  }
+  const size_t total = (size_t)w * (size_t)h * 4;
+  const bool ok = write(fd, hdr, sizeof(hdr)) == (ssize_t)sizeof(hdr) &&
+                  write(fd, rgba, total) == (ssize_t)total;
+  close(fd);
+  switch_run_logf("[grab] frame %ux%u -> %s %s", w, h, path, ok ? "ok" : "WRITE FAILED");
+}
+
 void switch_net_send_frame(unsigned w, unsigned h, const void* rgba) {
-  if (!s_frame_host_valid || rgba == nullptr || w == 0 || h == 0) {
-    switch_run_logf("[grab] no wifi log host resolved - frame dropped (see the [net] lines)");
+  if (rgba == nullptr || w == 0 || h == 0) {
+    return;
+  }
+  if (!s_frame_host_valid) {
+    s_sd_write_frame(w, h, rgba);
     return;
   }
   int fd = socket(AF_INET, SOCK_STREAM, 0);
