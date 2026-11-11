@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>  // std::this_thread::sleep_for when out of focus (T10)
+#include <unordered_set>  // [sprtex] probe
 #include <unistd.h>
 
 #include "common/goal_constants.h"  // T49: jakN::LEVEL_TOTAL for the dk-path Loader
@@ -182,6 +183,16 @@ uint32_t dk_sprite_lookup(uint32_t tbp) {
     return 0;
   }
   auto id = s_dk_tex_pool->lookup(tbp);
+  // AI-assisted probe (turret-hit green squares): log each new tbp -> texture pairing once so
+  // the run log names the texture a sprite asked for and the id it got.
+  static std::unordered_set<uint64_t> s_seen;
+  const uint64_t key = ((uint64_t)tbp << 32) | (id ? (uint32_t)*id : 0u);
+  if (s_seen.size() < 3000 && s_seen.insert(key).second) {
+    switch_run_logf("[sprtex] tbp=%u id=%u slot=%u %ux%u common=%d %s", tbp,
+                    id ? (unsigned)*id : 0u, id ? dktexgpu::slot_of((uint32_t)*id) : 0u,
+                    (unsigned)src->w, (unsigned)src->h, (int)src->is_common,
+                    s_dk_tex_pool->get_debug_texture_name(src->tex_id).c_str());
+  }
   return id ? (uint32_t)*id : 0;
 }
 
