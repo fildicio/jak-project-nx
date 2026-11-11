@@ -17,7 +17,9 @@
 
 #ifdef __SWITCH__
 // FIX 70 (AI-assisted): core pinning for cubeb's audio thread.
+#include <array>
 #include <atomic>
+#include <map>
 
 #include "game/switch/platform.h"
 #include "game/switch/run_log.h"
@@ -31,6 +33,23 @@ namespace snd {
 // under mTickLock, so plain ints are enough.
 namespace {
 int s_aud_plays = 0, s_aud_nobank = 0, s_aud_nohandler = 0, s_aud_limit = 0;
+// per sound: [0] new play rejected by the instance limit, [1] older instance stopped for it
+std::map<std::pair<SoundBank*, u32>, std::array<int, 2>> s_aud_limited;
+void aud_report_top(int which, const char* what) {
+  const std::pair<SoundBank*, u32>* best = nullptr;
+  int n = 0;
+  for (auto& [k, v] : s_aud_limited) {
+    if (v[which] > n) {
+      n = v[which];
+      best = &k;
+    }
+  }
+  if (best) {
+    auto name = best->first->GetName();
+    switch_run_logf("[aud]   top %s: bank %.*s sound %u x%d", what,
+                    name ? (int)name->size() : 1, name ? name->data() : "?", best->second, n);
+  }
+}
 }  // namespace
 #endif
 
@@ -165,6 +184,9 @@ void Player::Tick(s16Output* stream, int samples) {
         switch_run_logf("[aud] 10s plays %d nobank %d nohandler %d limit %d | live %d",
                         s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit,
                         (int)mHandlers.size());
+        aud_report_top(0, "rejected");
+        aud_report_top(1, "cut-off");
+        s_aud_limited.clear();
         s_aud_plays = s_aud_nobank = s_aud_nohandler = s_aud_limit = 0;
       }
 #endif
@@ -203,6 +225,7 @@ u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm
   if (handler_to_stop) {
 #ifdef __SWITCH__
     s_aud_limit++;
+    s_aud_limited[{bank, sound_id}][handler_to_stop == handler.value().get() ? 0 : 1]++;
 #endif
     handler_to_stop->Stop();
     if (handler_to_stop == handler.value().get()) {
@@ -364,6 +387,9 @@ void Player::UnloadBank(BankHandle bank_handle) {
     switch_run_logf("[aud] bank unload stopped %u live sound(s)", stopped_live);
 #endif
   }
+#ifdef __SWITCH__
+  s_aud_limited.clear();  // its keys hold bank pointers
+#endif
 
   mLoader.UnloadBank(bank_handle);
 }
