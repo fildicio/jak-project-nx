@@ -649,17 +649,20 @@ if(NINTENDO_SWITCH)
     # 4x to the 256x256 that the home menu expects. The older .jpg files are kept
     # next to them so a missing .png degrades to the previous icon, not to a
     # build failure.
+    # 2026-11-15 (AI-assisted, user choice): the home-menu icon is the OpenGOAL logo again
+    # (gk-logo-jakN.jpg = the FIX 61 app256 masks as 256x256 JPEG; hbmenu only reads JPEG).
+    # The box-art gk-icon-jakN.jpg files stay as the fallback.
     if(SWITCH_GAME STREQUAL "jak2")
         set(GK_NRO_TITLE "Jak II")
-        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak2.jpg")
+        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-logo-jak2.jpg")
         set(GK_NRO_ICON_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak2.jpg")
     elseif(SWITCH_GAME STREQUAL "jak3")
         set(GK_NRO_TITLE "Jak 3")
-        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak3.jpg")
+        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-logo-jak3.jpg")
         set(GK_NRO_ICON_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak3.jpg")
     else()
         set(GK_NRO_TITLE "Jak and Daxter")
-        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak1.jpg")
+        set(GK_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-logo-jak1.jpg")
         set(GK_NRO_ICON_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/switch/gk-icon-jak1.jpg")
     endif()
 
