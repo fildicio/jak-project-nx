@@ -92,5 +92,13 @@ void distort_end();
 bool record_distort();
 // The frame target size, for the GL default viewport (OpenGLRenderer sets it per frame).
 void set_frame_size(int w, int h);
+// jak2 §7.0 F (AI-assisted): dktexgpu id of anim slot `slot` (GL TFragment/Tie3 bind
+// anim_slot_array[-(tree_tex_id+1)] for negative tree_tex_id). Read-only: 0 = no texture yet
+// (slot empty or not materialized). The animator runs after tfrag/tie: one frame lag.
+// Defined in dkgl_texture.cpp (host tests link it without this file).
+u32 anim_slot_dk_tex(int slot);
+// §7.0 I (AI-assisted): the `max` dkgl buckets with the most capture CPU ms since the last
+// call (bucket ids + summed ms, largest first); resets the sums. Returns how many it wrote.
+int capture_cpu_top(int* bucket, double* ms, int max);
 
 }  // namespace dkgl

@@ -1220,6 +1220,7 @@ bool init_jak2_foreground(TexturePool* pool, int loaded) {
   switch_run_logf("[dkgl] jak2 anim slots: %d/%d static clut textures (common level %s)",
                   anim_slots, (int)jak2_animated_texture_slots().size(),
                   s_common_level ? "ok" : "MISSING");
+  set_anim_slots(s_jak2_anim_slots.data(), s_jak2_anim_slots.size());  // §7.0 F
   s_merc2 = std::make_shared<Merc2>(s_srs->shaders, &s_jak2_anim_slots);
   s_eyes = std::make_unique<EyeRenderer>("eyes", 0);
   s_eyes->init_shaders(s_srs->shaders);

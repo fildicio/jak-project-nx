@@ -323,6 +323,8 @@ u32 pending_clear_mask();       // glClear bits recorded, flushed by the T106 dr
 // program draws nothing, by design).
 u32 resolve_texture_id(u32 gl_id);      // dkgl pseudo id -> dktexgpu id; passthrough otherwise
 u32 materialized_dk_tex(u32 gl_id);     // 0 = none / unknown id
+// §7.0 F (AI-assisted): register the jak2 anim slot table (GL ids, owned by dkgl_frame).
+void set_anim_slots(const u32* slots, size_t count);
 void generate_mips_flush(u32 gl_id);     // T129a: bound texture, materialize + queue blits
 bool texture_needs_barrier(u32 gl_id);  // was rendered to and no barrier sent yet
 void texture_barrier_sent(u32 gl_id);

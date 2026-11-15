@@ -18,6 +18,7 @@
 #include "game/graphics/deko3d_renderer/dk_buffer_pool.h"
 #include "game/graphics/deko3d_renderer/dk_proto_vis.h"
 #include "game/graphics/deko3d_renderer/dk_texture_gpu.h"
+#include "game/graphics/deko3d_renderer/dkgl/dkgl_frame.h"
 #include "game/graphics/deko3d_renderer/dk_tie3_prep.h"
 #include "game/graphics/gfx.h"  // Step 6: g_global_settings.lod_tie
 #include "game/graphics/opengl_renderer/background/background_common.h"
@@ -486,6 +487,8 @@ void build_frame(Loader* loader) {
           c.idx_count = grp.num;
           if (draw.tree_tex_id >= 0 && (size_t)draw.tree_tex_id < lev->textures.size()) {
             c.tex_id = lev->textures[draw.tree_tex_id];
+          } else if (draw.tree_tex_id < 0) {  // §7.0 F: animated texture slot
+            c.tex_id = dkgl::anim_slot_dk_tex(-(draw.tree_tex_id + 1));
           }
           c.tod_id = tod;
           c.strips = tree.use_strips;
@@ -563,6 +566,8 @@ void build_frame(Loader* loader) {
         c.idx_count = (uint32_t)groups[i].second;
         if (draw.tree_tex_id >= 0 && (size_t)draw.tree_tex_id < ld->textures.size()) {
           c.tex_id = ld->textures[draw.tree_tex_id];
+        } else if (draw.tree_tex_id < 0) {  // §7.0 F: animated texture slot
+          c.tex_id = dkgl::anim_slot_dk_tex(-(draw.tree_tex_id + 1));
         }
         c.tod_id = tod;
         c.strips = tree.use_strips;

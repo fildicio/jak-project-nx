@@ -642,6 +642,23 @@ u32 materialized_dk_tex(u32 gl_id) {
   TexObj* t = tex_by_gl(gl_id);
   return t ? t->dk_tex_id : 0;
 }
+
+// §7.0 F (AI-assisted): the jak2 anim slot table (dkgl_frame owns it, GL ids).
+namespace {
+const u32* g_anim_slots = nullptr;
+size_t g_anim_slot_count = 0;
+}  // namespace
+void set_anim_slots(const u32* slots, size_t count) {
+  g_anim_slots = slots;
+  g_anim_slot_count = count;
+}
+u32 anim_slot_dk_tex(int slot) {
+  if (!g_anim_slots || slot < 0 || (size_t)slot >= g_anim_slot_count) {
+    return 0;
+  }
+  const u32 gl = g_anim_slots[slot];
+  return gl < kTexIdBase ? gl : materialized_dk_tex(gl);
+}
 bool texture_needs_barrier(u32 gl_id) {
   TexObj* t = tex_by_gl(gl_id);
   return t && t->was_rendered_to && !t->barrier_done;
