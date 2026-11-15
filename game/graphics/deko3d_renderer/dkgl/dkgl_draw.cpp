@@ -4,6 +4,9 @@
 // only what changed since the last draw is re-emitted (begin_bucket resets the cache),
 // but UNIFORMS are snapshotted into a FRESH UBO slice on EVERY draw (brief lesson:
 // the GL side may rewrite uniforms between draws that share all other state).
+// Row I pass 2 (AI-assisted): the derivation itself is now diffed too -- a draw whose
+// VAO serial + buffer epoch + texture-param epoch all match the last draw skips the
+// vtx-format rebuild (step 7) and the texture bind emit (step 9) outright.
 //
 // Blend enable: DkBlendState has no enable bit (deko3d 0.5.0) -- a disabled GL blend
 // is encoded as factors ONE/ZERO with op ADD (result = src), the canonical mapping.
@@ -37,6 +40,16 @@ struct EmitCache {
   u32 color_mask = 0xF;  // T113
   u64 ubo_gpu[kMaxUboBindings] = {};  // TODO #5: glBindBufferRange addresses last bound
   u32 ubo_size[kMaxUboBindings] = {};
+  u64 uni7_gpu = 0;  // Row I: binding-7 uniform slice last emitted (0 = none yet)
+  u32 uni7_vs = 0;   // Row I: its vert / frag block sizes
+  u32 uni7_fs = 0;
+  // Row I pass 2 (AI-assisted): fast-path state. vao_serial/buf_epoch gate the step-7
+  // vtx-format derivation skip; tex_* gate the step-9 texture bind emit skip.
+  u32 vao_serial = 0;              // serial of the VAO the cached format came from
+  u64 buf_epoch = 0;               // buffer re-spec epoch at cache time
+  u32 tex_gl[kMaxTexUnits] = {};   // per unit: last-bound GL texture id (0 = none)
+  u32 tex_dk[kMaxTexUnits] = {};   // per unit: the dk texture id it resolved to
+  u32 tex_epoch = 0;               // tex-param epoch the cached binds were made at
 };
 EmitCache g_cache;
 u64 g_inert_draw_count = 0;
@@ -51,6 +64,18 @@ u64 g_vtx_stride_mismatch_count = 0;
 u64 g_missing_element_buffer_count = 0;
 u64 g_bad_ubo_count = 0;  // TODO #5: draw whose bound uniform range has no live data
 bool g_logged_bad_attrib = false;
+// (AI-assisted): the skip counters below existed but were never printed, and the GL_INT
+// allow-list policy skip was not even counted. One-shot stderr logs + per-reason counters
+// so gk_run_log.txt can say WHY a draw vanished.
+u64 g_int_attrib_skip_count = 0;  // GL_INT attribs outside the allow-list (policy skip)
+bool g_logged_int_attrib_skip = false;
+// Row I pass 2 (AI-assisted): fast-path hit counters for the 10 s perf line.
+u64 g_vao_fast_hits = 0;    // draws that skipped the step-7 vtx-format derivation
+u64 g_tex_bind_skips = 0;   // texture binds suppressed in step 9 (same id + same params)
+bool g_logged_dead_attrib_buffer = false;
+bool g_logged_no_attribs = false;
+bool g_logged_missing_element = false;
+bool g_logged_bad_ubo = false;
 
 // ---- maps (spellings verbatim from deko3d.h 0.5.0; check-dk.py validates) ------
 bool blend_factor_map(u32 gl, DkBlendFactor* out) {
@@ -315,6 +340,7 @@ void restore_bucket_end_state() {
 // (the pre-8fe05566c behaviour): only allow-listed animations draw (skull gem).
 void set_int_attrib_draws(bool on) {
   g_int_attrib_draws = on;
+  g_cache.valid = false;  // Row I pass 2: the GL_INT allow-list decision changed
 }
 u64 inert_draw_count() {
   return g_inert_draw_count;
@@ -325,6 +351,25 @@ u64 skipped_draw_count() {
 }
 u64 no_texture_draw_count() {
   return g_no_texture_draws;
+}
+// per-reason breakdown for the 10 s stats line
+u64 bad_attrib_draw_count() {
+  return g_bad_attrib_count;
+}
+u64 missing_element_draw_count() {
+  return g_missing_element_buffer_count;
+}
+u64 bad_ubo_draw_count() {
+  return g_bad_ubo_count;
+}
+u64 int_attrib_skip_count() {
+  return g_int_attrib_skip_count;
+}
+u64 vao_fast_hit_count() {
+  return g_vao_fast_hits;
+}
+u64 tex_bind_skip_count() {
+  return g_tex_bind_skips;
 }
 
 // Switch perf: read direct_basic_textured's frag alpha-test window + scissor flag
@@ -534,64 +579,84 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
   // glVertexAttribPointer time (T104b). dkgl review: one DkVtxBufferState per DISTINCT
   // buffer (OceanTexture_PC: static positions + dynamic data in one VAO); the attribs of
   // one buffer must share its stride.
+  // Row I pass 2 (AI-assisted): fast path -- same VAO, its serial unchanged (no
+  // attrib/element-buffer mutation) and no buffer re-spec (global epoch) means the GPU
+  // already holds this vertex format + bindings and every early-return check below
+  // passed for the previous draw with identical state. Merc2 binds a per-model VAO and
+  // draws without re-pointing attribs, so this hits between consecutive draws.
   const VaoObj* vao = bound_vao();
-  DkVtxAttribState attribs[kMaxAttribs];
-  DkVtxBufferState vbufs[kMaxAttribs];
-  u32 buf_names[kMaxAttribs];
-  u64 buf_gpu[kMaxAttribs];
-  u32 buf_bytes[kMaxAttribs];
-  u32 n_bufs = 0;
-  u32 n_attribs = 0;
-  for (u32 i = 0; i < kMaxAttribs; ++i) {
-    const auto& a = vao->attribs[i];
-    if (!a.enabled) {
-      continue;
-    }
-    if (a.type == gl::INT && !g_int_attrib_draws) {
-      return;  // TextureAnimator composite outside the allow-list (see set_int_attrib_draws)
-    }
-    DkVtxAttribSize sz;
-    DkVtxAttribType ty;
-    if (!attrib_map(a.size, a.type, a.normalized, a.integer, &sz, &ty)) {
-      ++g_bad_attrib_count;
-      if (!g_logged_bad_attrib) {
-        g_logged_bad_attrib = true;
-        std::fprintf(stderr, "[dkgl] draw skipped: attrib %u size %d type 0x%x norm %d int %d\n",
-                     i, a.size, a.type, (int)a.normalized, (int)a.integer);
+  if (g_cache.valid && g_cache.vao == (const void*)vao && g_cache.vao_serial == vao->serial &&
+      g_cache.buf_epoch == buffer_epoch()) {
+    ++g_vao_fast_hits;
+  } else {
+    DkVtxAttribState attribs[kMaxAttribs];
+    DkVtxBufferState vbufs[kMaxAttribs];
+    u32 buf_names[kMaxAttribs];
+    u64 buf_gpu[kMaxAttribs];
+    u32 buf_bytes[kMaxAttribs];
+    u32 n_bufs = 0;
+    u32 n_attribs = 0;
+    for (u32 i = 0; i < kMaxAttribs; ++i) {
+      const auto& a = vao->attribs[i];
+      if (!a.enabled) {
+        continue;
       }
-      return;  // unknown attrib format: skip the draw (never guess a layout)
+      if (a.type == gl::INT && !g_int_attrib_draws) {
+        ++g_int_attrib_skip_count;  // policy skip: counted separately (was invisible before)
+        if (!g_logged_int_attrib_skip) {
+          g_logged_int_attrib_skip = true;
+          std::fprintf(stderr, "[dkgl] draw skipped: GL_INT attrib %u outside allow-list\n", i);
+        }
+        return;  // TextureAnimator composite outside the allow-list (see set_int_attrib_draws)
+      }
+      DkVtxAttribSize sz;
+      DkVtxAttribType ty;
+      if (!attrib_map(a.size, a.type, a.normalized, a.integer, &sz, &ty)) {
+        ++g_bad_attrib_count;
+        if (!g_logged_bad_attrib) {
+          g_logged_bad_attrib = true;
+          std::fprintf(stderr, "[dkgl] draw skipped: attrib %u size %d type 0x%x norm %d int %d\n",
+                       i, a.size, a.type, (int)a.normalized, (int)a.integer);
+        }
+        return;  // unknown attrib format: skip the draw (never guess a layout)
+      }
+      const BufferObj* bo = buffer(a.buffer);
+      if (!bo || !bo->valid || bo->cpu == nullptr) {
+        ++g_bad_attrib_count;
+        if (!g_logged_dead_attrib_buffer) {
+          g_logged_dead_attrib_buffer = true;
+          std::fprintf(stderr, "[dkgl] draw skipped: attrib %u buffer %u dead/empty\n", i,
+                       a.buffer);
+        }
+        return;  // attrib points at a dead/failed buffer: skip the draw
+      }
+      u32 b = 0;
+      while (b < n_bufs && buf_names[b] != a.buffer) {
+        ++b;
+      }
+      if (b == n_bufs) {
+        buf_names[b] = a.buffer;  // first attrib of this buffer fixes its stride
+        buf_gpu[b] = bo->gpu;
+        buf_bytes[b] = bo->bytes;
+        vbufs[b] = DkVtxBufferState{a.stride, 0};
+        ++n_bufs;
+      } else if (a.stride != vbufs[b].stride) {
+        ++g_vtx_stride_mismatch_count;  // counter + FIRST stride (spec rule)
+      }
+      attribs[n_attribs++] = DkVtxAttribState{b, 0, (u32)a.offset, sz, ty, 0};
     }
-    const BufferObj* bo = buffer(a.buffer);
-    if (!bo || !bo->valid || bo->cpu == nullptr) {
+    if (n_attribs == 0 || n_bufs == 0) {
       ++g_bad_attrib_count;
-      return;  // attrib points at a dead/failed buffer: skip the draw
+      if (!g_logged_no_attribs) {
+        g_logged_no_attribs = true;
+        std::fprintf(stderr, "[dkgl] draw skipped: no enabled vertex attribs\n");
+      }
+      return;  // nothing to draw without a vertex layout
     }
-    u32 b = 0;
-    while (b < n_bufs && buf_names[b] != a.buffer) {
-      ++b;
-    }
-    if (b == n_bufs) {
-      buf_names[b] = a.buffer;  // first attrib of this buffer fixes its stride
-      buf_gpu[b] = bo->gpu;
-      buf_bytes[b] = bo->bytes;
-      vbufs[b] = DkVtxBufferState{a.stride, 0};
-      ++n_bufs;
-    } else if (a.stride != vbufs[b].stride) {
-      ++g_vtx_stride_mismatch_count;  // counter + FIRST stride (spec rule)
-    }
-    attribs[n_attribs++] = DkVtxAttribState{b, 0, (u32)a.offset, sz, ty, 0};
-  }
-  if (n_attribs == 0 || n_bufs == 0) {
-    ++g_bad_attrib_count;
-    return;  // nothing to draw without a vertex layout
-  }
-  bool vtx_same = g_cache.valid && g_cache.vao == (const void*)vao && g_cache.n_vtx_bufs == n_bufs;
-  for (u32 b = 0; vtx_same && b < n_bufs; ++b) {
-    vtx_same = g_cache.vtx_gpu[b] == buf_gpu[b] && g_cache.vtx_bytes[b] == buf_bytes[b];
-  }
-  if (!vtx_same) {
     e->set_vtx_format(attribs, n_attribs, vbufs, buf_gpu, buf_bytes, n_bufs);
     g_cache.vao = vao;
+    g_cache.vao_serial = vao->serial;
+    g_cache.buf_epoch = buffer_epoch();
     g_cache.n_vtx_bufs = n_bufs;
     for (u32 b = 0; b < n_bufs; ++b) {
       g_cache.vtx_gpu[b] = buf_gpu[b];
@@ -605,6 +670,11 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
     const BufferObj* ib = buffer(vao->element_buffer);
     if (!ib || !ib->valid || ib->cpu == nullptr) {
       ++g_missing_element_buffer_count;
+      if (!g_logged_missing_element) {
+        g_logged_missing_element = true;
+        std::fprintf(stderr, "[dkgl] draw skipped: element buffer %u dead/empty\n",
+                     vao->element_buffer);
+      }
       return;
     }
     if (!idx_fmt_map(idx_type, &idx_fmt)) {
@@ -619,7 +689,18 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
   }
 
   // 9. samplers: one per unit with a bound texture; an RT that was rendered to gets
-  // its render-to-texture barrier exactly once (before the first sampling draw)
+  // its render-to-texture barrier exactly once (before the first sampling draw).
+  // Row I pass 2 (AI-assisted): a unit whose gl texture, resolved dk image AND the
+  // tex-param epoch all match the last emit keeps its binding -- the handle is already
+  // bound on both stages (bind_tex emits two commands), so skip the combo walk and the
+  // emit. The barrier check stays unconditional: an RT re-rendered between two draws
+  // with the same binding re-arms it.
+  if (g_cache.tex_epoch != texture_param_epoch()) {
+    for (u32 u2 = 0; u2 < kMaxTexUnits; ++u2) {
+      g_cache.tex_gl[u2] = 0;  // params changed: every cached combo is stale
+    }
+    g_cache.tex_epoch = texture_param_epoch();
+  }
   u32 n_bound_units = 0;  // §7.2 phase 2: draws with ZERO textures run on stale
                           // bindings (a pool miss GL would render with its placeholder)
   for (u32 unit = 0; unit < kMaxTexUnits; ++unit) {
@@ -641,7 +722,13 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
       e->barrier_before_sample();
       texture_barrier_sent(gl_id);
     }
+    if (g_cache.valid && g_cache.tex_gl[unit] == gl_id && g_cache.tex_dk[unit] == dk_id) {
+      ++g_tex_bind_skips;
+      continue;  // same texture + same params: nothing to re-bind
+    }
     e->bind_tex(unit, dk_id, texture_sampler_combo(unit, gl_id));
+    g_cache.tex_gl[unit] = gl_id;
+    g_cache.tex_dk[unit] = dk_id;
   }
   if (n_bound_units == 0) {
     ++g_no_texture_draws;
@@ -662,6 +749,11 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
     const BufferObj* bo = buffer(ub.name);
     if (!bo || !bo->valid || bo->gpu == 0 || ((bo->gpu + ub.offset) & (kUboAlign - 1)) != 0) {
       ++g_bad_ubo_count;
+      if (!g_logged_bad_ubo) {
+        g_logged_bad_ubo = true;
+        std::fprintf(stderr, "[dkgl] draw skipped: ubo %u (binding %u) dead/unaligned\n", ub.name,
+                     i);
+      }
       return;
     }
     ubo_gpu[i] = bo->gpu + ub.offset;
@@ -679,33 +771,60 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
     }
   }
 
-  // 10. uniforms -- snapshot EVERY draw into a FRESH UBO slice (never reuse within a
-  // frame): one slice carries both stage blocks. dkgl review: a UBO address must be
-  // 0x100-aligned (DK_UNIFORM_BUF_ALIGNMENT), so the frag block starts at the vert block
-  // size rounded up to 0x100, not right after it (the shadow keeps the packed layout).
+  // 10. uniforms. Row I (AI-assisted): write_uniform now suppresses no-op writes, so a
+  // draw whose program shadow is clean re-BINDS the slice that program last uploaded
+  // in THIS frame slot instead of snapshotting a fresh one (Merc2 re-sends the same
+  // light/decal values for every draw of a model). ring_take never wraps within a
+  // frame, so the old slice stays intact until the slot is recycled; a slot change
+  // (next frame) or a dirty shadow forces a fresh snapshot. dkgl review: a UBO
+  // address must be 0x100-aligned (DK_UNIFORM_BUF_ALIGNMENT), so the frag block
+  // starts at the vert block size rounded up to 0x100, not right after it (the
+  // shadow keeps the packed layout).
   const u32 vs_bytes = table->vert.block_size;
   const u32 fs_bytes = table->frag.block_size;
   const u32 fs_off = (vs_bytes + 0xFFu) & ~0xFFu;
   if (vs_bytes + fs_bytes > 0) {
-    void* cpu = nullptr;
-    u64 gpu = 0;
-    if (e->ubo_alloc(fs_off + fs_bytes, &cpu, &gpu)) {
-      const u8* shadow_bytes = program_uniform_shadow(prog);
-      u8* dst = (u8*)cpu;
-      if (shadow_bytes) {
-        std::memcpy(dst, shadow_bytes, vs_bytes);
-        std::memcpy(dst + fs_off, shadow_bytes + vs_bytes, fs_bytes);
+    u64 slice_gpu = 0;
+    u32 slice_slot = 0;
+    if (program_uniform_dirty(prog) ||
+        (slice_gpu = program_uniform_slice(prog, &slice_slot)) == 0 ||
+        slice_slot != e->ubo_ring_slot()) {
+      slice_gpu = 0;
+      void* cpu = nullptr;
+      u64 gpu = 0;
+      if (e->ubo_alloc(fs_off + fs_bytes, &cpu, &gpu)) {
+        const u8* shadow_bytes = program_uniform_shadow(prog);
+        u8* shadow_dst = (u8*)cpu;  // named shadow_dst: `dst` is the blend local above
+        if (shadow_bytes) {
+          std::memcpy(shadow_dst, shadow_bytes, vs_bytes);
+          std::memcpy(shadow_dst + fs_off, shadow_bytes + vs_bytes, fs_bytes);
+        } else {
+          std::memset(shadow_dst, 0, fs_off + fs_bytes);
+        }
+        program_uniform_set_slice(prog, gpu, e->ubo_ring_slot());
+        slice_gpu = gpu;
       } else {
-        std::memset(dst, 0, fs_off + fs_bytes);
+        // ring full: keep the old slice if it came from this slot, else nothing to bind
+        u32 old_slot = 0;
+        const u64 old_gpu = program_uniform_slice(prog, &old_slot);
+        if (old_gpu != 0 && old_slot == e->ubo_ring_slot()) {
+          slice_gpu = old_gpu;
+        }
       }
+      program_uniform_clear_dirty(prog);
+    }
+    if (slice_gpu != 0 && (!g_cache.valid || g_cache.uni7_gpu != slice_gpu ||
+                           g_cache.uni7_vs != vs_bytes || g_cache.uni7_fs != fs_bytes)) {
       if (vs_bytes) {
-        e->bind_ubo(DkStage_Vertex, 7, gpu, vs_bytes);
+        e->bind_ubo(DkStage_Vertex, 7, slice_gpu, vs_bytes);
       }
       if (fs_bytes) {
-        e->bind_ubo(DkStage_Fragment, 7, gpu + fs_off, fs_bytes);
+        e->bind_ubo(DkStage_Fragment, 7, slice_gpu + fs_off, fs_bytes);
       }
+      g_cache.uni7_gpu = slice_gpu;
+      g_cache.uni7_vs = vs_bytes;
+      g_cache.uni7_fs = fs_bytes;
     }
-    program_uniform_clear_dirty(prog);
   }
 
   // 11. primitive restart

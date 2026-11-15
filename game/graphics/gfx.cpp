@@ -193,12 +193,13 @@ u32 Init(GameVersion version) {
       fmt::format(" - {} - {}", version_to_game_name_external(g_game_version), build_revision());
 
 #if defined(__SWITCH__)
-  // deko3d migration (AI-assisted): jak1 always uses deko3d, with no OpenGL fallback
-  // (2026-10-30, user decision). jak2/jak3 only with the gk_dk3d.txt opt-in; for them a
-  // failure before a display exists still falls back to OpenGL in the same boot (the deko3d
-  // path never initializes SDL video, so GL can still come up afterwards).
+  // deko3d migration (AI-assisted): jak1 and jak2 always use deko3d, no opt-in flag
+  // (jak1 since 2026-10-30, jak2 since 2026-11-13 after rows A-I passed on HW -- user
+  // decision). jak3 still needs gk_dk3d.txt. For jak2/jak3 a failure before a display
+  // exists still falls back to OpenGL in the same boot (the deko3d path never initializes
+  // SDL video, so GL can still come up afterwards); jak1 has no fallback.
   if (dk_renderer::kill_switch_present(version) && g_main_thread_id == std::this_thread::get_id()) {
-    switch_run_logf("[gfx] deko3d selected (jak1 default / gk_dk3d.txt) -> trying deko3d renderer");
+    switch_run_logf("[gfx] deko3d selected (jak1/jak2 default) -> trying deko3d renderer");
     g_global_settings.renderer = GetRenderer(GfxPipeline::Deko3D);
     if (GetCurrentRenderer()->init(g_global_settings) == 0 &&
         Display::InitMainDisplay(640, 480, title.c_str(), g_global_settings, version) == 0) {

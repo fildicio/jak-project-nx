@@ -96,6 +96,8 @@ struct Emitter {
     return ring_alloc(bytes, align, cpu, gpu);
   }
   virtual bool ubo_alloc(u32 bytes, void** cpu, u64* gpu) = 0;
+  // Row I: which frame ring slot ubo_alloc slices came from (slice-reuse validity).
+  virtual u32 ubo_ring_slot() const { return 0; }
   // draws
   virtual void draw_arrays(DkPrimitive prim, u32 first, u32 count) = 0;
   virtual void draw_elements(DkPrimitive prim, u32 count, u32 index_offset_bytes) = 0;
@@ -138,6 +140,10 @@ struct VaoObj {
   bool live = false;
   AttribShadow attribs[kMaxAttribs];
   u32 element_buffer = 0;  // GL_ELEMENT_ARRAY_BUFFER is VAO state in GL
+  // Row I pass 2 (AI-assisted): bumped on EVERY mutation of this VAO (attrib
+  // enable/pointer, element-buffer bind/clear) so flush_pending can skip re-deriving
+  // the DkVtxAttribState/DkVtxBufferState arrays when nothing changed since the last draw.
+  u32 serial = 0;
 };
 
 struct ShadowState {
@@ -332,6 +338,20 @@ const ProgramUniformTable* program_table(u32 program);  // null = inert
 const u8* program_uniform_shadow(u32 program);          // 512 bytes (vert block + frag block), nullptr if dead
 bool program_uniform_dirty(u32 program);
 void program_uniform_clear_dirty(u32 program);
+// Row I (AI-assisted): per-draw Merc2 profile + UBO-slice reuse (see dkgl_draw.cpp 10).
+u64 uniform_write_count();                          // glUniform* calls seen
+u64 uniform_update_count();                         // writes that changed shadow bytes
+u64 ubo_upload_bytes();                             // GL_UNIFORM_BUFFER glBufferSubData bytes
+u64 buffer_epoch();  // Row I pass 2: bumps on every BufferObj re-spec (gpu/bytes/valid
+                     // mutate in place; the draw path must re-emit vtx/idx/ubo binds).
+                     // u64: this bumps several times per frame; u32 would wrap in ~a day.
+u32 texture_param_epoch();  // Row I pass 2: bumps on glTexParameter/glSamplerParam/
+                            // glBindSampler (a texture unit's combo can change while
+                            // its bound gl id stays the same)
+u64 vao_fast_hit_count();   // Row I pass 2: draws that skipped vtx-format derivation
+u64 tex_bind_skip_count();  // Row I pass 2: texture binds suppressed (same id+combo)
+u64 program_uniform_slice(u32 program, u32* slot);  // slice gpu addr, 0 = none live
+void program_uniform_set_slice(u32 program, u64 gpu, u32 slot);
 // internal seams between dkgl_state.cpp and the T105 files
 Emitter* emitter();                     // the installed emitter (null on host w/o mock)
 void set_bound_texture(u32 name);       // record `name` on the CURRENT texture unit
@@ -348,6 +368,10 @@ void restore_bucket_end_state();
 u64 inert_draw_count();             // draws skipped because the program is not in the table
 u64 skipped_draw_count();           // dkgl review: draws dropped (unknown attrib format, no IBO...)
 u64 no_texture_draw_count();        // §7.2 phase 2: draws with every sampler unbound (stale bind)
+u64 bad_attrib_draw_count();        // skipped subset -- attrib format/dead buffer/none
+u64 missing_element_draw_count();   // skipped subset -- element buffer dead/empty
+u64 bad_ubo_draw_count();           // skipped subset -- uniform range dead/unaligned
+u64 int_attrib_skip_count();        // GL_INT allow-list policy skips
 u64 lost_clear_count();             // clears still pending at frame_begin (must stay 0)
 void consume_pending_clear();       // flush step 2 zeroes the recorded glClear bits
 // pending target switch queued by bind_framebuffer, emitted at the next draw

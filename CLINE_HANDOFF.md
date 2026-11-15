@@ -1190,3 +1190,32 @@ allocations in any game.
 
 Deployed: jak1 3eb9f1585fe9b52b19a07301c723b63b, jak2 d9fd59e925735dd63c13ce764dff3d2b, jak3
 6b4be49d3f30a5221381e9bcd950182a. The previous build is `Jak N.f103.bak`. Desktop `f103c/`.
+
+## FIX 104 — jak2 pause-menu Level Select: any mission selectable, replay completed ones (AI-assisted)
+
+User report after the SD-card incident: "can't select the mission from the secrets menu anymore".
+Investigation: NOT a regression. The card's `GAME.CGO` (bf5c0c66, the 7-Nov arm64 build at then-HEAD)
+still contains FIX 81/82; nothing GOAL-side was lost with the SD restore. The cause was FIX 82's
+deliberate forward-only design: from pause → Secrets → Level Select, confirm was blocked with a
+low-pitch `generic-beep` when the mission's play-node was closed (= already completed) or had no
+`play-continue`. The user's save now has most early missions completed, so most rows beeped.
+
+- `goal_src/jak2/engine/ui/progress/progress.gc` (menu-select-scene-option confirm, ~line 2937):
+  block condition `(or (not play-continue) (task-node-closed? play-node))` → `(not play-continue)`.
+  Completed missions now take the normal path: `play-task ... #f 'play` calls `task-node-open!`,
+  which un-closes the node (and un-marks the task complete if it had close-task), so the mission
+  replays with orbs/gems/purchases kept. Rows without a play start point still beep (nothing to
+  start from). Unreached-but-available missions were already selectable; behavior unchanged there.
+- GOAL-only: no C++, no NRO rebuild. Rebuilt with the standing rule
+  `./build-host/goalc/goalc --game jak2 --instruction-set arm64 --cmd '(make-group "iso")'`;
+  933 targets, only `GAME.CGO` + `TSZ.DGO` changed in iso/ (usual relink pair). Determinism check:
+  a comment-only rebuild reproduced GAME.CGO md5 byte-for-byte.
+- Deployed + md5-verified to card: `GAME.CGO` c1f1245bab6a0b84e9726c3a88ce6369,
+  `TSZ.DGO` 0f85f66b5c1c84838a39815accda4f35. Backups of the previous files:
+  `~/Desktop/jak bakcups/f100/` (old GAME.CGO was bf5c0c66…).
+- Known effects (by design): replaying a completed mission marks it not-complete until redone
+  (`open!` clears the complete status and bumps task-counter); the mission's parent nodes get
+  closed by `task-node-open!` (standard skip semantics). Skipping while inside an active
+  mission/race is still untested on hardware (pre-existing FIX 82 caveat).
+- jak3 still has the FIX 82 forward-only block; lift it the same way if the user wants it.
+

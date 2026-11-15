@@ -58,6 +58,10 @@ struct SamplerObj {
 };
 SamplerObj g_samplers[kMaxSamplers];
 u32 g_unit_sampler[kMaxTexUnits] = {};
+// Row I pass 2 (AI-assisted): bumped whenever anything that feeds texture_sampler_combo
+// changes (tex params, sampler params, unit sampler binds). flush_pending uses it to
+// keep a per-unit texture binding across draws without re-walking the combo.
+u32 g_tex_param_epoch = 0;
 SamplerObj* sampler_by_id(u32 id) {
   return (id >= 1 && id <= kMaxSamplers && g_samplers[id - 1].live) ? &g_samplers[id - 1]
                                                                      : nullptr;
@@ -199,6 +203,7 @@ void tex_parameteri(u32 pname, u32 param) {
   if (!t) {
     if (bound != 0 && bound < kTexIdBase) {
       PoolTexParams& p = g_pool_params[bound];
+      ++g_tex_param_epoch;  // Row I pass 2: pool params feed the combo
       if (pname == gl::TEXTURE_MIN_FILTER) {
         p.min_filter = param;
       } else if (pname == gl::TEXTURE_MAG_FILTER) {
@@ -213,6 +218,7 @@ void tex_parameteri(u32 pname, u32 param) {
     }
     return;
   }
+  ++g_tex_param_epoch;  // Row I pass 2: tex params feed the combo
   if (pname == gl::TEXTURE_MIN_FILTER) {
     t->min_filter = param;
   } else if (pname == gl::TEXTURE_MAG_FILTER) {
@@ -245,12 +251,14 @@ void delete_samplers(int n, const u32* in) {
       for (u32& u : g_unit_sampler) {
         u = u == in[i] ? 0 : u;
       }
+      ++g_tex_param_epoch;  // Row I pass 2: a unit's sampler combo changed
     }
   }
 }
 void bind_sampler(u32 unit, u32 sampler) {
   if (unit < kMaxTexUnits) {
     g_unit_sampler[unit] = sampler;
+    ++g_tex_param_epoch;  // Row I pass 2: unit combos come from the bound sampler
   }
 }
 void sampler_parameteri(u32 sampler, u32 pname, u32 param) {
@@ -258,6 +266,7 @@ void sampler_parameteri(u32 sampler, u32 pname, u32 param) {
   if (!s) {
     return;
   }
+  ++g_tex_param_epoch;  // Row I pass 2: sampler params feed the combo
   if (pname == gl::TEXTURE_MIN_FILTER) {
     s->p.min_filter = param;
   } else if (pname == gl::TEXTURE_MAG_FILTER) {
@@ -702,6 +711,9 @@ u32 bound_framebuffer() {
 }
 void pending_target_consumed() {
   g_pending_target.active = false;
+}
+u32 texture_param_epoch() {
+  return g_tex_param_epoch;
 }
 u32 texture_sampler_combo(u32 unit, u32 gl_id) {
   TexObj* t = tex_by_gl(gl_id);

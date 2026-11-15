@@ -43,6 +43,7 @@
 #include "game/graphics/opengl_renderer/TextureUploadHandler.h"
 #include "game/graphics/opengl_renderer/Warp.h"  // T128: jak2 gmerc-warp 317
 #include "game/graphics/opengl_renderer/ShadowRenderer.h"
+#include "game/graphics/opengl_renderer/background/background_common.h"  // row P: sampler unbind
 #include "game/graphics/opengl_renderer/foreground/Shadow2.h"  // §7.2 phase 2
 #include "game/graphics/opengl_renderer/foreground/Generic2.h"
 #include "game/graphics/opengl_renderer/foreground/Generic2BucketRenderer.h"
@@ -373,6 +374,10 @@ int s_cur_bucket = -1;
 u64 s_census_draws[kMaxBuckets] = {};
 u64 s_census_idx[kMaxBuckets] = {};
 u32 s_census_idx_max[kMaxBuckets] = {};
+// Row I (AI-assisted): glDraw* attempts per list since the last [dkgl] perf line.
+// Merc2's cost is CPU-side, so the b201/b205 draw counts give the per-draw divisor
+// for the glUniform / bone-UBO / int-skip counters printed next to them.
+u64 s_win_draws[kMaxBuckets] = {};
 int s_tie_census_idx[5 * 6];  // §7.0 E: master + 4 category list indexes per level
 int s_tie_census_n = 0;
 bool s_seg_open = false;
@@ -843,6 +848,7 @@ class SwitchEmitter final : public Emitter {
   bool ubo_alloc(u32 bytes, void** cpu, u64* gpu) override {
     return ring_take(s_ubo[s_slot], bytes, DK_UNIFORM_BUF_ALIGNMENT, cpu, gpu);
   }
+  u32 ubo_ring_slot() const override { return s_slot; }  // Row I: slice-reuse validity
   void draw_arrays(DkPrimitive prim, u32 first, u32 count) override {
     if (s_recording) {
       if (s_cur_bucket >= 0) {  // §7.0 E census
@@ -1212,7 +1218,12 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
     ScopedProfilerNode prof(&node);
     r->render(dma, s_srs.get(), prof);
   }
+  // Row P (AI-assisted): like OpenGLRenderer FIX 43, never leave a background sampler bound
+  // into the next bucket or the texture animator; it overrides their texture wrap/filter
+  // (cloud noise lost GL_REPEAT -> hard-edged sky quads).
+  background_sampler_unbind();
   s_lists[list_idx].draws = draw_count() - draws_before;
+  s_win_draws[list_idx] += s_lists[list_idx].draws;  // Row I: per-window draw profile
   restore_bucket_end_state();  // T113: no colour mask / stencil leaks into native passes
   if (dma.current_tag_offset() != s_srs->next_bucket) {
     s_dma_mismatch++;  // OpenGLRenderer asserts here; dkgl only counts (logged per 10 s)
@@ -1843,6 +1854,13 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
   if (!s_active) {
     return false;
   }
+  // Like OpenGLRenderer's per-frame m_render_state.frame_idx++ (AI-assisted). Tie3's
+  // render_from_another only draws when its master ran THIS frame; with frame_idx stuck,
+  // the TRANS/WATER category buckets drew with a master's stale level pointers after the
+  // level unloaded (HW crash 2026-11-15 at Kor, Tie3.cpp glBindTexture).
+  if (s_srs) {
+    s_srs->frame_idx++;
+  }
   if (s_src_probe_frames > 0) {
     s_src_probe_frames--;  // #19: run_gpu may log source misses while this is nonzero
   }
@@ -2394,7 +2412,7 @@ void capture_end() {
     s_last_log_capture = s_captures;
     switch_run_logf(
         "[dkgl] ocean %llu frames | segs %u+%u | data %u/%u KB ubo %u/%u KB high | fails "
-        "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | dma mismatch %llu | cmd overflow "
+        "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
         "bad %llu | distort %llu bad %llu",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
@@ -2404,12 +2422,49 @@ void capture_end() {
         s_ubo[s_slot].high / 1024, kUboBytes / 1024, s_data[s_slot].fails, s_ubo[s_slot].fails,
         (unsigned long long)draw_count(), (unsigned long long)skipped_draw_count(),
         (unsigned long long)inert_draw_count(), (unsigned long long)no_texture_draw_count(),
+        (unsigned long long)bad_attrib_draw_count(),
+        (unsigned long long)missing_element_draw_count(), (unsigned long long)bad_ubo_draw_count(),
+        (unsigned long long)int_attrib_skip_count(),
         (unsigned long long)s_dma_mismatch,
         (unsigned long long)s_cmd_overflows, (unsigned long long)unsupported_blit_count(),
         (unsigned long long)s_eye_draws, (unsigned long long)s_interleaved_frames,
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
         (unsigned long long)s_glow_bad, (unsigned long long)s_distort_draws,
         (unsigned long long)s_distort_bad);
+    // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
+    // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
+    // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData
+    // bytes (bone uploads), GL_INT attrib policy skips, and the glDraw* attempts of
+    // the two PRIS merc buckets that topped the CPU list (b201 / b205, jak2 names).
+    {
+      static u64 s_prev_writes = 0, s_prev_updates = 0, s_prev_ubo = 0, s_prev_int = 0;
+      static u64 s_prev_vao = 0, s_prev_texskip = 0;  // Row I pass 2
+      const u64 writes = uniform_write_count(), updates = uniform_update_count();
+      const u64 ubo_b = ubo_upload_bytes(), ints = int_attrib_skip_count();
+      const u64 vao_fast = vao_fast_hit_count(), texskip = tex_bind_skip_count();
+      const int i201 = list_index((int)jak2::BucketId::MERC_L1_PRIS);
+      const int i205 = list_index((int)jak2::BucketId::MERC_L2_PRIS);
+      const u64 d201 = i201 >= 0 ? s_win_draws[i201] : 0;
+      const u64 d205 = i205 >= 0 ? s_win_draws[i205] : 0;
+      for (int i = 0; i < s_bucket_count; i++) {
+        s_win_draws[i] = 0;
+      }
+      switch_run_logf(
+          "[dkgl] perf | glUniform +%llu (changed %llu) | bone UBO +%llu KB | int skip "
+          "+%llu | merc draws b201 %llu b205 %llu | vao fast +%llu | tex keep +%llu",
+          (unsigned long long)(writes - s_prev_writes),
+          (unsigned long long)(updates - s_prev_updates),
+          (unsigned long long)((ubo_b - s_prev_ubo) / 1024),
+          (unsigned long long)(ints - s_prev_int), (unsigned long long)d201,
+          (unsigned long long)d205, (unsigned long long)(vao_fast - s_prev_vao),
+          (unsigned long long)(texskip - s_prev_texskip));
+      s_prev_writes = writes;
+      s_prev_updates = updates;
+      s_prev_ubo = ubo_b;
+      s_prev_int = ints;
+      s_prev_vao = vao_fast;
+      s_prev_texskip = texskip;
+    }
     // §7.0 E census (AI-assisted): one line per tie level, master + the 4 category buckets.
     // d = draws, i = indices (k/M suffix), x = largest single draw, all totals since the
     // previous census line. ETIE_W_* drawing far more draws/indices than its TIE_W_* twin

@@ -2926,12 +2926,15 @@
        (logclear! (-> *cpad-list* cpads 0 button0-abs 0) (pad-buttons confirm))
        (logclear! (-> *cpad-list* cpads 0 button0-rel 0) (pad-buttons confirm))
        (cond
-         ;; og:preserve-this FIX 82 (Switch): opened from the pause menu -> skip forward to the mission
-         ;; without resetting game-info (orbs, gems, purchases, collected pickups kept). Past missions blocked.
+         ;; og:preserve-this FIX 82 (Switch): opened from the pause menu -> skip to the mission
+         ;; without resetting game-info (orbs, gems, purchases, collected pickups kept).
+         ;; FIX 104 (2026-11-16): any mission selectable. Completed (closed play-node) missions
+         ;; are allowed again -- play-task re-opens the node and replays it keeping the save.
+         ;; Only rows without a play start point (play-continue #f) still get the low beep.
          ((!= (-> *progress-state* starting-state) 'title)
           (let ((info (-> *game-info* play-list (-> this real-task-index))))
             (cond
-              ((or (not (-> info play-continue)) (task-node-closed? (-> info play-node)))
+              ((not (-> info play-continue))
                (sound-play "generic-beep" :pitch -0.6)
                )
               (else

@@ -1672,11 +1672,14 @@ void TextureAnimator::run_clut_blender_group(DmaTransfer& tf,
                                              int idx,
                                              u64 frame_idx,
                                              TexturePool* texture_pool) {
-#if defined(__SWITCH__)
-  if (m_version == GameVersion::Jak2) {
-    return;  // jak2 dkgl (AI-assisted): keep the static textures, see SKULL_GEM above.
-  }
-#endif
+  // jak2 dkgl (AI-assisted): the blanket Switch ban on this group ("keeps static
+  // textures") was removed 2026-11-13. ClutBlender::run is pure CPU (clut blend +
+  // index lookup) plus one opengl_upload_texture, which dkgl handles in place through
+  // the deferred staging ring (dkgl_texture.cpp "clut-blender outputs"); darkjak
+  // publishes via m_private_output_slots only (move_to_pool = false), the same
+  // anim-slot bind path the skull gem already uses on HW. The old ban was really for
+  // the fixed-anim GL draws, not this. HW-verified 2026-11-13 (user): Dark Jak's dark
+  // palette now ramps during the transform.
   auto& blenders = m_clut_blender_groups.at(idx);
   const int tbps_size = sizeof(u32) * 4 * ((blenders.blenders.size() + 3) / 4);
   float f;

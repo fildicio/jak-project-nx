@@ -712,12 +712,13 @@ TEST(DkglState, DrawFlushScriptedOceanOrder) {
   EXPECT_EQ(mock.frame_target_calls, 1u);
   draw_elements(gl::TRIANGLE_STRIP, 3, gl::UNSIGNED_INT, (void*)8);  // draw 3 (same)
 
-  // 1. distinct UBO slices on EVERY draw (3 draws x vert+frag pair)
-  ASSERT_EQ(mock.ubo_binds.size(), 6u);
+  // 1. UBO slices: one vert+frag pair per draw that needs one. Row I pass 1 (dirty-only
+  // uniforms): draw 3 wrote no uniforms, so its program shadow is clean and it REUSES
+  // draw 2's slice (and skips the re-emit entirely) -- 2 draws x pair = 4 binds.
+  ASSERT_EQ(mock.ubo_binds.size(), 4u);
   EXPECT_EQ(mock.ubo_binds[0].stage, DkStage_Vertex);
   EXPECT_EQ(mock.ubo_binds[1].stage, DkStage_Fragment);
   EXPECT_NE(mock.ubo_binds[0].gpu, mock.ubo_binds[2].gpu);  // draw 1 vs draw 2
-  EXPECT_NE(mock.ubo_binds[2].gpu, mock.ubo_binds[4].gpu);  // draw 2 vs draw 3
   // one slice; the frag block starts at the vert block size rounded up to the 0x100
   // UBO alignment (dkgl review: +16 would be an unaligned UBO address on the GPU)
   EXPECT_EQ(mock.ubo_binds[1].gpu - mock.ubo_binds[0].gpu, 0x100ull);
@@ -732,9 +733,11 @@ TEST(DkglState, DrawFlushScriptedOceanOrder) {
   EXPECT_EQ(mock.draws_a, 1u);
   EXPECT_EQ(mock.draws_e, 2u);
 
-  // 3. barrier: exactly ONE before the first sampling bind, none for the re-bind
+  // 3. barrier: exactly ONE before the first sampling bind, none for the re-bind.
+  // Row I pass 2: draw 3 is state-identical to draw 2, so its texture bind is also
+  // suppressed (same gl id + same dk id + params unchanged) -- exactly one tex bind.
   EXPECT_EQ(mock.barrier_count, 1u);
-  ASSERT_EQ(mock.tex_binds.size(), 2u);  // draw 2 and draw 3
+  ASSERT_EQ(mock.tex_binds.size(), 1u);  // draw 2 binds; draw 3 keeps it
   EXPECT_GT(mock.tex_binds[0][1], 0u);   // the materialized dk id
   const size_t barrier_pos = mock.log.find("barrier;");
   EXPECT_LT(barrier_pos, mock.log.find("tex;"));
@@ -744,7 +747,7 @@ TEST(DkglState, DrawFlushScriptedOceanOrder) {
   use_program(build_hinted_program("some-unmapped-program"));
   draw_arrays(gl::TRIANGLES, 0, 3);
   EXPECT_EQ(inert_draw_count(), inert_before + 1);
-  EXPECT_EQ(mock.ubo_binds.size(), 6u);
+  EXPECT_EQ(mock.ubo_binds.size(), 4u);
   EXPECT_EQ(mock.draws_a, 1u);
 
   // 6. separate alpha blend factors reach the DkBlendState verbatim
@@ -755,7 +758,7 @@ TEST(DkglState, DrawFlushScriptedOceanOrder) {
   EXPECT_EQ(mock.blend_states[0].dstAlphaBlendFactor, DkBlendFactor_InvSrcAlpha);
 
   // 7. no lost clear in the scripted run (delta-based: older tests may leave one),
-  // and begin_bucket re-emits everything
+  // and begin_bucket re-emits everything (fresh slice for the clean shadow too)
   const u64 lost_before = lost_clear_count();
   frame_begin();
   EXPECT_EQ(lost_clear_count(), lost_before);
@@ -765,7 +768,7 @@ TEST(DkglState, DrawFlushScriptedOceanOrder) {
   EXPECT_EQ(mock.blend_states.size(), 2u);
   EXPECT_EQ(mock.depth_states.size(), 2u);
   EXPECT_EQ(mock.shader_binds.size(), 2u);
-  EXPECT_EQ(mock.ubo_binds.size(), 8u);
+  EXPECT_EQ(mock.ubo_binds.size(), 6u);
   set_emitter(nullptr);
 }
 

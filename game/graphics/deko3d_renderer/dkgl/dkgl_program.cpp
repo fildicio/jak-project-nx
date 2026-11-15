@@ -16,6 +16,8 @@ namespace {
 constexpr u32 kMaxShaders = 128;
 constexpr u32 kMaxPrograms = 128;
 constexpr u32 kUniformShadowBytes = 512;  // T111: generic vert+frag = 272 B
+constexpr u32 kMaxUniformLocs = 96;  // Row I: locations = vert.count+frag.count (<=16+16 today)
+constexpr u32 kUniNone = 0xFFFFFFFFu;  // Row I: "no slot for this name in this stage"
 
 struct ShaderObj {
   bool live = false;
@@ -30,6 +32,16 @@ struct ProgramObj {
   u8 uniform_shadow[kUniformShadowBytes] = {};
   bool uniform_dirty = false;
   bool ever_used = false;
+  // Row I (AI-assisted): per-(program, location) destination cache. write_uniform used
+  // to strcmp-scan BOTH stage tables on every glUniform* call (Merc2 sends ~10/draw).
+  // Locations are dense indices, so the name->offset mapping resolves once; and a
+  // write whose bytes already match the shadow neither copies nor dirties the
+  // program, which lets T106 step 10 reuse the UBO slice (see dkgl_draw.cpp).
+  u8 uni_state[kMaxUniformLocs] = {};  // 0 unresolved, 1 no destination, 2 offsets valid
+  u32 uni_voff[kMaxUniformLocs] = {};  // shadow offset in the vert block, kUniNone = none
+  u32 uni_foff[kMaxUniformLocs] = {};  // shadow offset in the frag block, kUniNone = none
+  u64 uni_slice_gpu = 0;               // last UBO slice uploaded for this program
+  u32 uni_slice_slot = 0xFFFFFFFFu;    // frame ring slot that slice came from
 };
 
 ShaderObj g_shaders[kMaxShaders];
@@ -39,6 +51,8 @@ char g_pending_hint[64] = {};
 bool g_logged_inert = false;    // one-time log for "name not in table"
 bool g_logged_sampler = false;  // one-time log for ignored sampler uniforms
 char g_inert_program[64] = {};  // #19: a table program forced inert (native merc A/B)
+u64 g_uniform_writes = 0;   // Row I: glUniform* calls that reached write_uniform
+u64 g_uniform_updates = 0;  // Row I: writes that actually changed shadow bytes
 
 ShaderObj* shader(u32 id) {
   if (id == 0 || id > kMaxShaders) {
@@ -58,7 +72,13 @@ ProgramObj* program(u32 id) {
 // Write `bytes` into the combined shadow at EVERY stage slot carrying the same NAME
 // (GL exposes one location per name; if a uniform is in both stages, one glUniform*
 // updates both copies). vert slot -> offset, frag slot -> vert.block_size + offset.
+// Row I (AI-assisted): the name->offset mapping is resolved ONCE per (program,
+// location) -- the old path strcmp-scanned both stage tables on every call -- and a
+// write that changes no bytes does not dirty the program, so unchanged uniforms
+// (Merc2 re-sends the same light/decal values for every draw of a model) skip the
+// next UBO snapshot in T106 step 10.
 void write_uniform(int location, const void* bytes, u32 n) {
+  ++g_uniform_writes;
   ProgramObj* p = program(bound_program());
   if (!p || !p->table || location < 0) {
     return;
@@ -74,26 +94,51 @@ void write_uniform(int location, const void* bytes, u32 n) {
   const StageUniformTable& vt = p->table->vert;
   const StageUniformTable& ft = p->table->frag;
   const u32 loc = (u32)location;
-  const UniformSlot* hit = nullptr;
-  if (loc < vt.count) {
-    hit = &vt.slots[loc];
-  } else if (loc - vt.count < ft.count) {
-    hit = &ft.slots[loc - vt.count];
+  if (loc >= kMaxUniformLocs || loc >= vt.count + ft.count) {
+    return;  // beyond the combined location space (same drop as the old scan)
   }
-  if (!hit || !hit->name) {
+  if (p->uni_state[loc] == 0) {
+    const UniformSlot* hit = loc < vt.count ? &vt.slots[loc] : &ft.slots[loc - vt.count];
+    if (!hit->name) {
+      p->uni_state[loc] = 1;  // anonymous slot: nothing to write (old code returned)
+      return;
+    }
+    p->uni_voff[loc] = kUniNone;
+    p->uni_foff[loc] = kUniNone;
+    for (u32 i = 0; i < vt.count; ++i) {
+      if (vt.slots[i].name && std::strcmp(vt.slots[i].name, hit->name) == 0) {
+        p->uni_voff[loc] = vt.slots[i].offset;
+      }
+    }
+    for (u32 i = 0; i < ft.count; ++i) {
+      if (ft.slots[i].name && std::strcmp(ft.slots[i].name, hit->name) == 0) {
+        p->uni_foff[loc] = ft.slots[i].offset;
+      }
+    }
+    p->uni_state[loc] = 2;
+  }
+  if (p->uni_state[loc] == 1) {
     return;
   }
-  for (u32 i = 0; i < vt.count; ++i) {
-    if (vt.slots[i].name && std::strcmp(vt.slots[i].name, hit->name) == 0) {
-      std::memcpy(p->uniform_shadow + vt.slots[i].offset, bytes, n);
+  bool changed = false;
+  if (p->uni_voff[loc] != kUniNone) {
+    u8* dst = p->uniform_shadow + p->uni_voff[loc];
+    if (std::memcmp(dst, bytes, n) != 0) {
+      std::memcpy(dst, bytes, n);
+      changed = true;
     }
   }
-  for (u32 i = 0; i < ft.count; ++i) {
-    if (ft.slots[i].name && std::strcmp(ft.slots[i].name, hit->name) == 0) {
-      std::memcpy(p->uniform_shadow + vt.block_size + ft.slots[i].offset, bytes, n);
+  if (p->uni_foff[loc] != kUniNone) {
+    u8* dst = p->uniform_shadow + vt.block_size + p->uni_foff[loc];
+    if (std::memcmp(dst, bytes, n) != 0) {
+      std::memcpy(dst, bytes, n);
+      changed = true;
     }
   }
-  p->uniform_dirty = true;
+  if (changed) {
+    p->uniform_dirty = true;
+    ++g_uniform_updates;
+  }
 }
 
 }  // namespace
@@ -177,6 +222,8 @@ void link_program(u32 program_id) {
   }
   std::memset(p->uniform_shadow, 0, sizeof(p->uniform_shadow));
   p->uniform_dirty = true;
+  p->uni_slice_gpu = 0;  // Row I: a fresh link must snapshot a fresh slice
+  p->uni_slice_slot = 0xFFFFFFFFu;
 }
 void delete_shader(u32 shader_id) {
   if (ShaderObj* s = shader(shader_id)) {
@@ -310,6 +357,30 @@ bool program_uniform_dirty(u32 program_id) {
 void program_uniform_clear_dirty(u32 program_id) {
   if (ProgramObj* p = program(program_id)) {
     p->uniform_dirty = false;
+  }
+}
+// Row I (AI-assisted): per-draw Merc2 profile counters + the program's live UBO slice,
+// so T106 step 10 can re-bind an unchanged uniform block instead of re-uploading it.
+u64 uniform_write_count() {
+  return g_uniform_writes;
+}
+u64 uniform_update_count() {
+  return g_uniform_updates;
+}
+u64 program_uniform_slice(u32 program_id, u32* slot) {
+  ProgramObj* p = program(program_id);
+  if (!p || p->uni_slice_gpu == 0) {
+    return 0;
+  }
+  if (slot) {
+    *slot = p->uni_slice_slot;
+  }
+  return p->uni_slice_gpu;
+}
+void program_uniform_set_slice(u32 program_id, u64 gpu, u32 slot) {
+  if (ProgramObj* p = program(program_id)) {
+    p->uni_slice_gpu = gpu;
+    p->uni_slice_slot = slot;
   }
 }
 void mark_program_used(u32 program_id) {

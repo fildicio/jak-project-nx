@@ -1261,7 +1261,17 @@ void Merc2::do_draws(const Draw* draw_array,
                   render_state->fog_intensity / 255);
       fog_on = true;
     }
+#if defined(__SWITCH__)
+    // DKGL_TODO Q (AI-assisted): since dkgl honours sampler objects (c155bb1b7) merc really
+    // samples the BCn mip chain (jak2 only), and some small mips are wrong on deko3d (breakable
+    // ruins props turned flat orange/beige). Back to level 0 only, like before c155bb1b7;
+    // gk_dkgl_mercmips.txt turns merc mips back on for A/B.
+    static const bool s_merc_mips =
+        std::fopen("sdmc:/switch/jak2/gk_dkgl_mercmips.txt", "r") != nullptr;
+    bool use_mipmaps_for_filtering = s_merc_mips || render_state->version != GameVersion::Jak2;
+#else
     bool use_mipmaps_for_filtering = true;
+#endif
     if (draw.texture != last_tex) {
       if (draw.texture < (int)lev->textures.size() && draw.texture >= 0) {
         glBindTexture(GL_TEXTURE_2D, lev->textures.at(draw.texture));

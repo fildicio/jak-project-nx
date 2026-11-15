@@ -122,8 +122,8 @@ int dk_init(GfxGlobalSettings& /*settings*/) {
   return 0;
 }
 
-// T49 (AI-assisted, P2.3 bring-up): OPT-IN dk-path Loader, only when
-// sdmc:/switch/<game>/gk_dkload.txt exists (on top of gk_dk3d.txt). The Loader still
+// T49 (AI-assisted, P2.3 bring-up): dk-path Loader (jak1/jak2: always on with the
+// deko3d default; jak3: still opt-in via gk_dkload.txt on top of gk_dk3d.txt). The Loader still
 // runs its GL staging code; dk_gl_census stubs every glad pointer (no context here) so
 // those calls are no-ops, and the run log names each GL function the Loader reaches —
 // the exact list of seams still to write. Level textures go to dktexgpu via the T43
@@ -135,11 +135,12 @@ std::unique_ptr<Loader> s_dk_loader;
 std::atomic<Loader*> s_dk_loader_ptr{nullptr};  // read by the EE thread (set_levels)
 std::atomic<float> s_dk_pmode_alp{1.f};  // GOAL set_pmode_alp (EE thread), read per frame
 
-// TODO #12 (AI-assisted): jak1 runs on deko3d by default, so every opt-in pass file
-// counts as present there and there is no OpenGL opt-out (gfx.cpp). jak2/jak3 keep the
-// per-pass opt-in files until they render right.
+// TODO #12 (AI-assisted): jak1 and jak2 run on deko3d by default (jak2 since 2026-11-13,
+// after the dkgl rows A-I passed on HW), so every opt-in pass file counts as present for
+// them and there is no OpenGL opt-out (gfx.cpp). jak3 keeps the per-pass opt-in files
+// until it renders right.
 bool dk_pass_on(GameVersion version, const char* file) {
-  if (version == GameVersion::Jak1) {
+  if (version == GameVersion::Jak1 || version == GameVersion::Jak2) {
     return true;
   }
   char path[96];
@@ -727,7 +728,7 @@ void dk_loader_start() {
   switch_run_logf("[dk] dk-loader step 3/3: load_common GAME.fr3");
   dkgl::set_common_level(&s_dk_loader->load_common(*s_dk_tex_pool, "GAME"));
   s_dk_loader_ptr.store(s_dk_loader.get());
-  switch_run_logf("[dk] dk-loader up (gk_dkload.txt): common loaded, tex live=%u fail=%d",
+  switch_run_logf("[dk] dk-loader up: common loaded, tex live=%u fail=%d",
                   dktexgpu::live_count(), dktexgpu::failed_allocs());
   if (g_game_version == GameVersion::Jak1 && dktfrag_present()) {
     s_dk_tfrag = true;
@@ -1659,6 +1660,7 @@ void dk_set_pmode_alp(float val) {
 namespace dk_renderer {
 bool kill_switch_present(GameVersion version) {
   // jak1: deko3d only, the gk_opengl.txt opt-out is gone (2026-10-30, user decision).
+  // jak2: deko3d too (2026-11-13, rows A-I HW-passed) -- no gk_dk3d.txt/gk_dkload.txt needed.
   return dk_pass_on(version, "gk_dk3d.txt");
 }
 }  // namespace dk_renderer

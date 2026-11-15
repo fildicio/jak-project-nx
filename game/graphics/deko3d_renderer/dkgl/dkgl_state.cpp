@@ -17,6 +17,7 @@ Emitter* g_emitter = nullptr;
 constexpr u64 kDirtyAll = ~0ull;
 u64 g_dirty = kDirtyAll;
 u64 g_draws = 0;
+u64 g_ubo_upload_bytes = 0;  // Row I: uniform-buffer upload bytes (Merc2 bone uploads)
 BufferObj g_buffers[kMaxBuffers];
 // T104b: entry 0 = the DEFAULT VAO (name 0, always live); names 1..kMaxVaos.
 VaoObj g_vaos[kMaxVaos + 1];
@@ -145,6 +146,9 @@ u32 bound_texture(u32 unit) {
 }
 u64 draw_count() {
   return g_draws;
+}
+u64 ubo_upload_bytes() {
+  return g_ubo_upload_bytes;
 }
 u64 unknown_cap_count() {
   return g_unknown_cap_count;
@@ -280,7 +284,17 @@ void note_table_full(const char* what) {
   static bool s_logged = false;
   if (!s_logged) {
     s_logged = true;
-    std::fprintf(stderr, "[dkgl] object table full: %s (raise kMax* in dkgl_state.h)\n", what);
+    u32 live_vaos = 0, live_bufs = 0;
+    for (u32 n = 1; n <= kMaxVaos; ++n) {
+      live_vaos += g_vaos[n].live ? 1u : 0u;
+    }
+    for (u32 n = 0; n < kMaxBuffers; ++n) {
+      live_bufs += g_buffers[n].live ? 1u : 0u;
+    }
+    std::fprintf(stderr,
+                 "[dkgl] object table full: %s (raise kMax* in dkgl_state.h; live vaos %u/%u, "
+                 "live buffers %u/%u)\n",
+                 what, live_vaos, kMaxVaos, live_bufs, kMaxBuffers);
   }
 }
 void get_integerv(u32 pname, int* out) {
@@ -345,6 +359,7 @@ void delete_buffers(int n, const u32* in) {
       for (auto& vao : g_vaos) {
         if (vao.element_buffer == in[i]) {
           vao.element_buffer = 0;
+          ++vao.serial;  // Row I pass 2
         }
       }
     }
@@ -357,6 +372,7 @@ void bind_buffer(u32 target, u32 name) {
     g_bound_array_buffer = name;
   } else if (target == gl::ELEMENT_ARRAY_BUFFER) {
     bound_vao()->element_buffer = name;
+    ++bound_vao()->serial;  // Row I pass 2: idx binding changed, re-derive at next draw
   } else if (target == gl::UNIFORM_BUFFER) {
     g_bound_uniform_buffer = name;  // TODO #5: Merc2 bone uploads
   }
@@ -397,6 +413,7 @@ void enable_vertex_attrib_array(u32 index) {
   // are legal without binding one -- GL compatibility semantics.
   if (index < kMaxAttribs) {
     bound_vao()->attribs[index].enabled = true;
+    ++bound_vao()->serial;  // Row I pass 2
   }
 }
 void use_program(u32 program) {
@@ -412,6 +429,10 @@ void active_texture(u32 unit_enum) {
 }
 
 // ---- buffers: glBufferData ring renaming (T104b) ------------------------------
+// Row I pass 2 (AI-assisted): BufferObj gpu/bytes/valid mutate IN PLACE (no rename), so
+// the draw path cannot detect a re-spec by comparing names. Every mutation bumps this
+// epoch; flush_pending re-derives vtx-format/idx/ubo bindings whenever it changed.
+u64 g_buffer_epoch = 0;
 bool buffer_data(u32 target, u64 size, const void* data, u32 usage) {
   if (target != gl::ARRAY_BUFFER && target != gl::ELEMENT_ARRAY_BUFFER &&
       target != gl::UNIFORM_BUFFER) {
@@ -441,6 +462,7 @@ bool buffer_data(u32 target, u64 size, const void* data, u32 usage) {
     bo->cpu = nullptr;
     bo->gpu = 0;
     bo->bytes = 0;
+    ++g_buffer_epoch;  // Row I pass 2
     return true;
   }
   // Outside a frame (renderer init: static quads, index lists) the data must outlive the
@@ -456,6 +478,7 @@ bool buffer_data(u32 target, u64 size, const void* data, u32 usage) {
     bo->cpu = nullptr;
     bo->gpu = 0;
     bo->bytes = 0;
+    ++g_buffer_epoch;  // Row I pass 2
     return false;
   }
   if (data && size) {
@@ -465,6 +488,7 @@ bool buffer_data(u32 target, u64 size, const void* data, u32 usage) {
   bo->gpu = gpu;
   bo->bytes = (u32)size;
   bo->valid = true;
+  ++g_buffer_epoch;  // Row I pass 2: fresh slice (gpu/bytes changed)
   return true;
 }
 
@@ -494,6 +518,7 @@ bool buffer_sub_data(u32 target, u64 offset, u64 size, const void* data) {
     bo->cpu = nullptr;
     bo->gpu = 0;
     bo->bytes = 0;
+    ++g_buffer_epoch;  // Row I pass 2
     return false;
   }
   memcpy(cpu, data, (size_t)size);
@@ -501,6 +526,10 @@ bool buffer_sub_data(u32 target, u64 offset, u64 size, const void* data) {
   bo->gpu = gpu - offset;
   bo->bytes = (u32)(offset + size);
   bo->valid = true;
+  ++g_buffer_epoch;  // Row I pass 2: fresh slice (gpu/bytes changed)
+  if (uniform) {
+    g_ubo_upload_bytes += size;  // Row I: the Merc2 bone-upload byte counter
+  }
   return true;
 }
 
@@ -520,6 +549,7 @@ void capture_attrib(u32 index, int size, u32 type, bool normalized, bool integer
     return;  // GL fixes locations 0..7 for the ocean attribs; anything else is a bug
   }
   AttribShadow& a = bound_vao()->attribs[index];
+  ++bound_vao()->serial;  // Row I pass 2: the layout (or its buffer) changed
   a.size = size;
   a.type = type;
   a.normalized = normalized;
@@ -578,6 +608,12 @@ void forget_texture_binding(u32 name) {
       g_bound_textures[u] = 0;
     }
   }
+}
+
+// Row I pass 2 (AI-assisted): epoch accessors. The bumpers live beside the data they
+// guard (g_buffer_epoch above; g_tex_param_epoch in dkgl_texture.cpp).
+u64 buffer_epoch() {
+  return g_buffer_epoch;
 }
 
 }  // namespace dkgl
