@@ -469,22 +469,46 @@ void capture_chain(const void* data,
   } else {
     buckets_base = d.current_tag_offset();
   }
+  // BUG M / green squares (AI-assisted): GL's Sprite3 flushes the sprite bucket at its own
+  // bucket id, so its texture_pool->lookup sees VRAM as the upload buckets BELOW it left it.
+  // jak2 also has TextureUploadHandler buckets ABOVE the sprite bucket (TEX_ALL_WARP 316,
+  // DEBUG_NO_ZBUF1 318, TEX_ALL_MAP 319, SUBTITLE 322 -- kJak2TexBuckets). Reading the
+  // sprites only after replaying all of those resolved effect-sprite pages against
+  // end-of-frame VRAM, and an effect page reused by a later upload (map / warp / subtitle
+  // fonts) drew that texture instead: the green squares near the chimney, on gunshots and
+  // on turret hits. Walk the sprite bucket when the replay passes its id, so the lookups
+  // run with the same pool state as GL -- the same rule the dkgl buckets already follow
+  // (dk_upload_bucket_hook). jak1 has no upload bucket above its sprite bucket (65 < 66),
+  // so its walk still lands after the loop.
+  bool sprites_at_bucket = false;
   for (int bi = 0; bi < tex_bucket_count; ++bi) {
     const int b = tex_buckets[bi];
+    if (!sprites_at_bucket && b > sprite_bucket) {
+      sprites_at_bucket = true;
+      if (hook) {
+        hook(sprite_bucket);
+      }
+      if (read_sprites) {
+        const uint32_t slot = buckets_base + 16 * sprite_bucket;
+        walk_sprite_bucket(data, slot, slot + 16);
+      }
+    }
     if (hook) {
       hook(b);
     }
     const uint32_t slot = buckets_base + 16 * b;
     walk_tex_bucket(data, slot, slot + 16, upload);
   }
-  if (hook) {
-    // fires even without sprite capture, so the dkgl buckets below the sprite bucket
-    // (jak2 ocean-near 310 etc.) still run at their GL position
-    hook(sprite_bucket);
-  }
-  if (read_sprites) {
-    const uint32_t slot = buckets_base + 16 * sprite_bucket;
-    walk_sprite_bucket(data, slot, slot + 16);
+  if (!sprites_at_bucket) {
+    if (hook) {
+      // fires even without sprite capture, so the dkgl buckets below the sprite bucket
+      // (jak2 ocean-near 310 etc.) still run at their GL position
+      hook(sprite_bucket);
+    }
+    if (read_sprites) {
+      const uint32_t slot = buckets_base + 16 * sprite_bucket;
+      walk_sprite_bucket(data, slot, slot + 16);
+    }
   }
 }
 
