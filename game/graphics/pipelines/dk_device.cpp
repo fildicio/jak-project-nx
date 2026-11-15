@@ -139,15 +139,15 @@ constexpr uint32_t kUboBytes = 0x80000;  // T20: 512 KB UBO ring = kFbNum (2) fr
 constexpr uint32_t kSamplerCount = sizeof(kSamplers) / sizeof(kSamplers[0]);  // 16 (PipelineTable.inc)
 constexpr uint32_t kOffSamplers = kOffUbo + kUboBytes;             // 0x2B4100, == old data-pool end
 constexpr uint32_t kSamplersBytes = kSamplerCount * DK_SAMPLER_DESCRIPTOR_ALIGNMENT;  // 0x200 = 512 B
-// T106 (AI-assisted): 16 dkgl sampler COMBOS for the GL-style ocean layer, appended
-// after the T34a table. combo bit0 min_linear | bit1 mag_linear | bit2 mip_linear |
-// bit3 repeat (dkgl_state.h texture_sampler_combo). 16 * 0x20 = 0x200 more, absorbed
-// by the same rounding slack (region end 0x2B4300 + 0x200 = 0x2B4500 < 0x2B5000), so
-// the memblock size is still 0x2B5000 -- no allocation-size change, no renumbering.
-constexpr uint32_t kDkglSamplerCount = 16;
+// T106 (AI-assisted): dkgl sampler COMBOS for the GL-style layer, appended after the
+// T34a table. combo bit0 min_linear | bit1 mag_linear | bit2 mip_linear | bit3 repeat_s |
+// bit4 repeat_t (dkgl_state.h texture_sampler_combo; 16 -> 32 when S/T got separate bits).
+// 32 * 0x20 = 0x400 more, absorbed by the same rounding slack (region end 0x2B4300 +
+// 0x400 = 0x2B4700 < 0x2B5000), so the memblock size is still 0x2B5000.
+constexpr uint32_t kDkglSamplerCount = 32;
 constexpr uint32_t kOffDkglSamplers = kOffSamplers + kSamplersBytes;  // 0x2B4300
 constexpr uint32_t kDkglSamplersBytes = kDkglSamplerCount * DK_SAMPLER_DESCRIPTOR_ALIGNMENT;
-constexpr uint32_t kDataPool = kOffDkglSamplers + kDkglSamplersBytes;  // 0x2B4500
+constexpr uint32_t kDataPool = kOffDkglSamplers + kDkglSamplersBytes;  // 0x2B4700
 // The data memblock is rounded up to DK_MEMBLOCK_ALIGNMENT (0x1000) inside make_block; both
 // 0x2B4100 and 0x2B4300 round up to the same 0x2B5000, so the 512 B growth is absorbed with no
 // allocation-size change. (kOffSamplers is 0x20-aligned: 0x2B4100 % 0x20 == 0.)
@@ -1071,10 +1071,9 @@ bool upload_splash(const unsigned char* rgba, int width, int height) {
       // dkgl review (AI-assisted): no mip bit = GL_LINEAR/GL_NEAREST minification, which
       // samples level 0 only; DkMipFilter_Nearest would still pick a mip by LOD.
       smp.mipFilter = (combo & 4) ? DkMipFilter_Linear : DkMipFilter_None;
-      const DkWrapMode wrap = (combo & 8) ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
-      smp.wrapMode[0] = wrap;
-      smp.wrapMode[1] = wrap;
-      smp.wrapMode[2] = wrap;
+      smp.wrapMode[0] = (combo & 8) ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
+      smp.wrapMode[1] = (combo & 16) ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
+      smp.wrapMode[2] = smp.wrapMode[1];
       DkSamplerDescriptor sdesc;
       dkSamplerDescriptorInitialize(&sdesc, &smp);
       memcpy(sbase + kOffDkglSamplers + combo * DK_SAMPLER_DESCRIPTOR_ALIGNMENT, &sdesc,

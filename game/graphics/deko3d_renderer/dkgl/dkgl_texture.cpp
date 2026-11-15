@@ -48,6 +48,20 @@ struct PoolTexParams {
   u32 wrap_s = gl::CLAMP_TO_EDGE, wrap_t = gl::CLAMP_TO_EDGE;
 };
 std::unordered_map<u32, PoolTexParams> g_pool_params;
+// GL sampler objects: id = slot + 1 (own GL namespace, 0 = none). The jak2 background
+// renderers (background_common.cpp) put wrap/filter here instead of on the texture; before
+// these existed every such draw sampled with the pool defaults (clamp, no mips).
+constexpr u32 kMaxSamplers = 64;
+struct SamplerObj {
+  bool live = false;
+  PoolTexParams p;  // set to the GL sampler defaults by gen_samplers
+};
+SamplerObj g_samplers[kMaxSamplers];
+u32 g_unit_sampler[kMaxTexUnits] = {};
+SamplerObj* sampler_by_id(u32 id) {
+  return (id >= 1 && id <= kMaxSamplers && g_samplers[id - 1].live) ? &g_samplers[id - 1]
+                                                                     : nullptr;
+}
 
 TexObj g_textures[kMaxTextures];
 FboObj g_fbos[kMaxFbos];
@@ -209,6 +223,49 @@ void tex_parameteri(u32 pname, u32 param) {
     t->wrap_t = param;
   } else {
     ++g_bad_tex_param_count;  // stored nowhere, but the call is not an error
+  }
+}
+void gen_samplers(int n, u32* out) {
+  for (int i = 0; i < n; ++i) {
+    out[i] = 0;
+    for (u32 s = 0; s < kMaxSamplers; ++s) {
+      if (!g_samplers[s].live) {
+        g_samplers[s].live = true;
+        g_samplers[s].p = {gl::NEAREST_MIPMAP_LINEAR, gl::LINEAR, gl::REPEAT, gl::REPEAT};
+        out[i] = s + 1;
+        break;
+      }
+    }
+  }
+}
+void delete_samplers(int n, const u32* in) {
+  for (int i = 0; i < n; ++i) {
+    if (SamplerObj* s = sampler_by_id(in[i])) {
+      s->live = false;
+      for (u32& u : g_unit_sampler) {
+        u = u == in[i] ? 0 : u;
+      }
+    }
+  }
+}
+void bind_sampler(u32 unit, u32 sampler) {
+  if (unit < kMaxTexUnits) {
+    g_unit_sampler[unit] = sampler;
+  }
+}
+void sampler_parameteri(u32 sampler, u32 pname, u32 param) {
+  SamplerObj* s = sampler_by_id(sampler);
+  if (!s) {
+    return;
+  }
+  if (pname == gl::TEXTURE_MIN_FILTER) {
+    s->p.min_filter = param;
+  } else if (pname == gl::TEXTURE_MAG_FILTER) {
+    s->p.mag_filter = param;
+  } else if (pname == gl::TEXTURE_WRAP_S) {
+    s->p.wrap_s = param;
+  } else if (pname == gl::TEXTURE_WRAP_T) {
+    s->p.wrap_t = param;
   }
 }
 bool tex_image_2d(int level, u32 internal_format, int w, int h, u32 format, u32 type,
@@ -629,14 +686,21 @@ u32 bound_framebuffer() {
 void pending_target_consumed() {
   g_pending_target.active = false;
 }
-u32 texture_sampler_combo(u32 gl_id) {
+u32 texture_sampler_combo(u32 unit, u32 gl_id) {
   TexObj* t = tex_by_gl(gl_id);
   PoolTexParams pool;
-  u32 min_filter, mag_filter, wrap_s;
-  if (t) {
+  u32 min_filter, mag_filter, wrap_s, wrap_t;
+  const SamplerObj* so = unit < kMaxTexUnits ? sampler_by_id(g_unit_sampler[unit]) : nullptr;
+  if (so) {
+    min_filter = so->p.min_filter;
+    mag_filter = so->p.mag_filter;
+    wrap_s = so->p.wrap_s;
+    wrap_t = so->p.wrap_t;
+  } else if (t) {
     min_filter = t->min_filter;
     mag_filter = t->mag_filter;
     wrap_s = t->wrap_s;
+    wrap_t = t->wrap_t;
   } else {
     // pool textures: what glTexParameteri set on them, else the TexturePool upload
     // defaults (LINEAR/LINEAR + CLAMP)
@@ -647,6 +711,7 @@ u32 texture_sampler_combo(u32 gl_id) {
     min_filter = pool.min_filter;
     mag_filter = pool.mag_filter;
     wrap_s = pool.wrap_s;
+    wrap_t = pool.wrap_t;
   }
   u32 combo = 0;
   switch (min_filter) {
@@ -670,6 +735,9 @@ u32 texture_sampler_combo(u32 gl_id) {
   }
   if (wrap_s == gl::REPEAT) {
     combo |= 8;
+  }
+  if (wrap_t == gl::REPEAT) {
+    combo |= 16;
   }
   return combo;
 }

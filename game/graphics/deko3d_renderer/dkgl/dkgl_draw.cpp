@@ -641,7 +641,7 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
       e->barrier_before_sample();
       texture_barrier_sent(gl_id);
     }
-    e->bind_tex(unit, dk_id, texture_sampler_combo(gl_id));
+    e->bind_tex(unit, dk_id, texture_sampler_combo(unit, gl_id));
   }
   if (n_bound_units == 0) {
     ++g_no_texture_draws;

@@ -104,6 +104,16 @@ void GLAPIENTRY dkgl_glTexParameteri(GLenum target, GLenum pname, GLint param) {
   (void)target;
   tex_parameteri(pname, param);
 }
+// jak2 background renderers (background_common.cpp): wrap/filter live in sampler objects.
+// glSamplerParameterf (anisotropy only) stays a census no-op.
+void GLAPIENTRY dkgl_glGenSamplers(GLsizei n, GLuint* samplers) { gen_samplers(n, samplers); }
+void GLAPIENTRY dkgl_glDeleteSamplers(GLsizei n, const GLuint* samplers) {
+  delete_samplers(n, samplers);
+}
+void GLAPIENTRY dkgl_glBindSampler(GLuint unit, GLuint sampler) { bind_sampler(unit, sampler); }
+void GLAPIENTRY dkgl_glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+  sampler_parameteri(sampler, pname, (u32)param);
+}
 void GLAPIENTRY dkgl_glTexImage2D(GLenum target, GLint level, GLint internalformat,
                                   GLsizei width, GLsizei height, GLint border,
                                   GLenum format, GLenum type, const void* pixels) {
@@ -330,6 +340,14 @@ void install_glad() {
       reinterpret_cast<PFNGLBINDTEXTUREPROC>(reinterpret_cast<void*>(&dkgl_glBindTexture));
   glad_glTexParameteri =
       reinterpret_cast<PFNGLTEXPARAMETERIPROC>(reinterpret_cast<void*>(&dkgl_glTexParameteri));
+  glad_glGenSamplers =
+      reinterpret_cast<PFNGLGENSAMPLERSPROC>(reinterpret_cast<void*>(&dkgl_glGenSamplers));
+  glad_glDeleteSamplers =
+      reinterpret_cast<PFNGLDELETESAMPLERSPROC>(reinterpret_cast<void*>(&dkgl_glDeleteSamplers));
+  glad_glBindSampler =
+      reinterpret_cast<PFNGLBINDSAMPLERPROC>(reinterpret_cast<void*>(&dkgl_glBindSampler));
+  glad_glSamplerParameteri = reinterpret_cast<PFNGLSAMPLERPARAMETERIPROC>(
+      reinterpret_cast<void*>(&dkgl_glSamplerParameteri));
   glad_glTexImage2D =
       reinterpret_cast<PFNGLTEXIMAGE2DPROC>(reinterpret_cast<void*>(&dkgl_glTexImage2D));
   glad_glTexSubImage2D = reinterpret_cast<PFNGLTEXSUBIMAGE2DPROC>(
@@ -444,7 +462,7 @@ void install_glad() {
   // spec text says "(23)"/"(6)"; T104b's subset has 24 entries, T105 adds 30, the review
   // adds glGetIntegerv -> 55. T126 adds the 5 renderbuffer calls (GlowRenderer).
   switch_run_logf("[dkgl] glad overrides: buffers/vao/state (24) + textures/programs (30) + "
-                  "glGetIntegerv + Generic2 (4) + depth-cue/shadow (6) + far ocean (8) + renderbuffers (5) = %d", 78);
+                  "glGetIntegerv + Generic2 (4) + depth-cue/shadow (6) + far ocean (8) + renderbuffers (5) + samplers (4) = %d", 82);
 }
 
 }  // namespace dkgl

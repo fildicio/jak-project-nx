@@ -547,7 +547,7 @@ void emit_fixed_state(DkCmdBuf cb) {
   const DkGpuAddr data = dkMemBlockGetGpuAddr(dkdev::data_mem());
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
-                                   dkdev::dkgl_sampler_slot(15) + 1);
+                                   dkdev::dkgl_sampler_slot(kSamplerCombos - 1) + 1);
   DkRasterizerState rs;
   dkRasterizerStateDefaults(&rs);
   rs.cullMode = DkFace_None;  // GL default: culling off (the ocean never enables it)

@@ -217,6 +217,12 @@ void delete_textures(int n, const u32* in);
 void active_texture(u32 unit_enum);
 void bind_texture(u32 name);
 void tex_parameteri(u32 pname, u32 param);
+// GL sampler objects (background_common.cpp binds one per draw mode: wrap S/T + filter).
+// A sampler bound to a unit overrides that unit's texture params, like GL.
+void gen_samplers(int n, u32* out);
+void delete_samplers(int n, const u32* in);
+void bind_sampler(u32 unit, u32 sampler);
+void sampler_parameteri(u32 sampler, u32 pname, u32 param);
 // T112: `level` is the GL mip level. Level 0 with new dimensions RESPECIFIES the texture
 // (DepthCue sizes its targets 1x1 at init, then to the screen size in setup()).
 // §7.0 D: top-left sub-rect rewrite of a live level-0 texture (tfrag tod palettes).
@@ -350,7 +356,10 @@ u32 pending_target_level();         // mip level attached to the pending offscre
 u32 pending_target_depth_dk_tex();  // T126: depth attachment of the pending FBO (0 = none)
 u32 bound_framebuffer();
 void pending_target_consumed();
-u32 texture_sampler_combo(u32 gl_id);  // bit0 min_linear | bit1 mag_linear | bit2 mip_linear | bit3 repeat
+// bit0 min_linear | bit1 mag_linear | bit2 mip_linear | bit3 repeat_s | bit4 repeat_t.
+// `unit`: a sampler object bound there wins over the texture's own params.
+constexpr u32 kSamplerCombos = 32;  // == dk_device.cpp kDkglSamplerCount
+u32 texture_sampler_combo(u32 unit, u32 gl_id);
 
 #if defined(__SWITCH__)
 // dkgl_glad.cpp: overwrite the dk_gl_census no-op stubs for the dkgl subset. The
