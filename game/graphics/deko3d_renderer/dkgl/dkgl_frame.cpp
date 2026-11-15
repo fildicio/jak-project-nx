@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -1067,6 +1068,8 @@ void distort_make_objects() {
 
 std::atomic<float> s_pmode_alp{1.f};         // GOAL set_pmode_alp, written on the EE thread
 BucketRenderer* s_renderers[kMaxBuckets] = {};
+// §7.0 I (AI-assisted): CPU ms each dkgl bucket's GL renderer spent in capture_until.
+double s_cap_cpu_ms[kMaxBuckets] = {};
 u64 s_dma_mismatch = 0;
 u64 s_last_log_capture = 0;
 u64 s_eye_draws = 0, s_interleaved_frames = 0;
@@ -1782,7 +1785,11 @@ void capture_until(int bucket) {
   while (s_cap_next < s_bucket_count && s_bucket_ids[s_cap_next] < bucket) {
     const int i = s_cap_next++;
     if (s_renderers[i]) {
+      const auto t0 = std::chrono::steady_clock::now();
       run_bucket(s_renderers[i], s_cap_chain, s_cap_base, s_bucket_ids[i], i);
+      s_cap_cpu_ms[i] +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+              .count();
       if (s_eye_list[i]) {
         s_eye_draws += s_lists[i].draws;
       }
@@ -2190,6 +2197,25 @@ bool record_distort() {
   return record_side_list(kDistortList);
 }
 
+int capture_cpu_top(int* bucket, double* ms, int max) {
+  int order[kMaxBuckets];
+  for (int i = 0; i < s_bucket_count; i++) {
+    order[i] = i;
+  }
+  const int top = std::min(max, s_bucket_count);
+  std::partial_sort(order, order + top, order + s_bucket_count,
+                    [](int x, int y) { return s_cap_cpu_ms[x] > s_cap_cpu_ms[y]; });
+  int n = 0;
+  for (int k = 0; k < top && s_cap_cpu_ms[order[k]] > 0; k++, n++) {
+    bucket[n] = s_bucket_ids[order[k]];
+    ms[n] = s_cap_cpu_ms[order[k]];
+  }
+  for (double& m : s_cap_cpu_ms) {
+    m = 0;
+  }
+  return n;
+}
+
 void capture_end() {
   if (!s_cap_open) {
     return;
@@ -2447,6 +2473,9 @@ bool capture_begin(const void*, u32) {
   return false;
 }
 void capture_until(int) {}
+int capture_cpu_top(int*, double*, int) {
+  return 0;
+}
 void capture_end() {}
 bool record_bucket(int) {
   return false;

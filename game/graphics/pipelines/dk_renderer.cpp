@@ -72,6 +72,30 @@ inline double dk_ms(u64 a, u64 b) {
   return dkdev::tick_ms(a, b);
 }
 
+// §7.0 I (AI-assisted): where the `capture` ms of the split line go (jak2 path). `walk` is
+// the SpriteDk tex-bucket walk minus the parts that run inside it (upload..distort).
+enum CapPart {
+  kCapDrain,
+  kCapWorld,
+  kCapUpload,
+  kCapDkgl,
+  kCapTexAnim,
+  kCapGlow,
+  kCapDistort,
+  kCapWalk,
+  kCapEnd,
+  kCapCount
+};
+const char* const kCapName[kCapCount] = {"drain", "world",   "upload", "dkgl", "texanim",
+                                         "glow",  "distort", "walk",   "end"};
+double s_cap_ms[kCapCount] = {};
+struct CapLap {
+  int part;
+  u64 t0;
+  explicit CapLap(int p) : part(p), t0(dk_tick()) {}
+  ~CapLap() { s_cap_ms[part] += dk_ms(t0, dk_tick()); }
+};
+
 struct DkSyncData {
   std::mutex sync_mutex;
   std::condition_variable sync_cv;
@@ -168,6 +192,7 @@ void dk_drain_tex_ops();  // T80: queued GOAL upload-now / relocate, defined bel
 // T79: TextureUploadHandler::flush_uploads on the dk pool (render thread, chain time).
 const u8* s_dk_upload_base = nullptr;
 void dk_sprite_upload(uint32_t page, int64_t mode) {
+  CapLap lap(kCapUpload);
   if (s_dk_tex_pool && s_dk_upload_base && page < (uint32_t)EE_MAIN_MEM_SIZE) {
     s_dk_tex_pool->handle_upload_now(s_dk_upload_base + page, (int)mode, s_dk_upload_base,
                                      offset_of_s7(), false);
@@ -231,6 +256,7 @@ void dk_skip_texture_anim(DmaFollower& dma) {
   }
 }
 void dk_texture_anim(DmaFollower& dma, const void* ee_mem) {
+  CapLap lap(kCapTexAnim);
   if (dkgl::tex_anim_begin()) {
     dkgl::texture_animator()->handle_texture_anim_data(dma, (const u8*)ee_mem,
                                                        s_dk_tex_pool.get(), g_dk->frame_idx);
@@ -243,6 +269,7 @@ void dk_texture_anim(DmaFollower& dma, const void* ee_mem) {
 // T126 (AI-assisted): jak2 glow section (after the HUD sprites in bucket 313) -> the
 // unchanged GL GlowRenderer through dkgl. Without a capture it is skipped (no glow drawn).
 void dk_glow(DmaFollower& dma) {
+  CapLap lap(kCapGlow);
   if (dkgl::glow_begin()) {
     dkgl::glow_dma(dma);
     dkgl::glow_end();
@@ -253,6 +280,7 @@ void dk_glow(DmaFollower& dma) {
 // -> the GL Sprite3 distort walk + draw through dkgl (scattergun heat haze). Without a
 // capture distort_dma still consumes the section, so the walk continues cleanly.
 void dk_distort(DmaFollower& dma) {
+  CapLap lap(kCapDistort);
   if (dkgl::distort_begin()) {
     dkgl::distort_dma(dma);
     dkgl::distort_end();
@@ -357,6 +385,7 @@ bool s_dkgl_interleave = false;
 void dk_upload_bucket_hook(int bucket) {
   dk_sky_bucket_hook(bucket);
   if (s_dkgl_interleave) {
+    CapLap lap(kCapDkgl);
     dkgl::capture_until(bucket);
   }
 }
@@ -1023,6 +1052,7 @@ void DkDisplay::render() {
       g_dk->frame_idx_of_input_data = g_dk->frame_idx;
     }
     std::unique_lock<std::mutex> lock(g_dk->dma_mutex);
+    CapLap lap_drain(kCapDrain);
     if (s_dk_jak2_dkgl && s_dk_jak2_world) {
       // AI-assisted: new deferred-copy staging slot BEFORE the capture stages this frame's
       // texture-anim / sky copies (they used to be flushed with a blocking submit when the
@@ -1110,12 +1140,14 @@ void DkDisplay::render() {
       // in GL order (the SpriteDk walker, sprite capture off) and runs the dkgl buckets
       // inside that replay at their GL position, exactly like the jak1 interleave (#16/#19).
       if (s_dk_jak2_world) {
+        CapLap lap(kCapWorld);
         dktf::capture_chain(g_dk->chain_data, g_dk->chain_offset);
         dktie::capture_chain(g_dk->chain_data, g_dk->chain_offset);
         dkshrub::capture_chain(g_dk->chain_data, g_dk->chain_offset);
       }
       s_dk_upload_base = (const u8*)g_dk->chain_data;
       s_sky_hook_data = nullptr;  // no jak1 sky blend on this path
+      CapLap lap_walk(kCapWalk);
       s_dkgl_interleave = dkgl::capture_begin(g_dk->chain_data, g_dk->chain_offset);
       dksprite::capture_chain(g_dk->chain_data, g_dk->chain_offset, dk_sprite_upload,
                               dk_sprite_lookup, dk_upload_bucket_hook, dksprite::kJak2TexBuckets,
@@ -1127,6 +1159,7 @@ void DkDisplay::render() {
                               dk_glow,          // T126: glow section -> GL GlowRenderer (dkgl)
                               dk_distort);      // T127: distort section -> GL distorter (dkgl)
       if (s_dkgl_interleave) {
+        CapLap lap(kCapEnd);  // the dkgl buckets the walk did not reach + frame end
         dkgl::capture_end();
         dkgl::note_interleaved_frame();
       }
@@ -1360,6 +1393,34 @@ void DkDisplay::render() {
                       (unsigned long long)dktexgpu::deferred_sync_fallbacks());
       s_tod_last = tod_now;
       prof_report();
+      if (s_dk_jak2_dkgl) {
+        // §7.0 I (AI-assisted): the capture split. drain = from the dma lock to the world
+        // reads (tex ops), walk = the tex-bucket walk itself (nested parts subtracted).
+        double c[kCapCount];
+        for (int i = 0; i < kCapCount; i++) {
+          c[i] = s_cap_ms[i] / n;
+          s_cap_ms[i] = 0;
+        }
+        c[kCapWalk] = std::max(0.0, c[kCapWalk] - c[kCapUpload] - c[kCapDkgl] -
+                                        c[kCapTexAnim] - c[kCapGlow] - c[kCapDistort] -
+                                        c[kCapEnd]);
+        c[kCapDrain] = std::max(0.0, c[kCapDrain] - c[kCapWorld] - c[kCapWalk] -
+                                         c[kCapUpload] - c[kCapDkgl] - c[kCapTexAnim] -
+                                         c[kCapGlow] - c[kCapDistort] - c[kCapEnd]);
+        char cl[512];
+        int cn = snprintf(cl, sizeof(cl), "[dk] capture ms |");
+        for (int i = 0; i < kCapCount; i++) {
+          cn += snprintf(cl + cn, sizeof(cl) - cn, " %s %.2f", kCapName[i], c[i]);
+        }
+        int tb[10];
+        double tm[10];
+        const int nt = dkgl::capture_cpu_top(tb, tm, 10);
+        cn += snprintf(cl + cn, sizeof(cl) - cn, " | dkgl top");
+        for (int i = 0; i < nt && cn < (int)sizeof(cl) - 16; i++) {
+          cn += snprintf(cl + cn, sizeof(cl) - cn, " b%d %.2f", tb[i], tm[i] / n);
+        }
+        switch_run_logf("%s", cl);
+      }
       if (s_dk_ocean) {
         // T95: ocean pass counters for this window.
         const dkocean::FlushStats& fs = dkocean::flush_stats();
