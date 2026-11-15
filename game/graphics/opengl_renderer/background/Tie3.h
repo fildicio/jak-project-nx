@@ -33,6 +33,19 @@ class Tie3 : public BucketRenderer {
        const std::vector<GLuint>* anim_slot_array,
        tfrag3::TieCategory category = tfrag3::TieCategory::NORMAL);
   void render(DmaFollower& dma, SharedRenderState* render_state, ScopedProfilerNode& prof) override;
+
+  // Switch dkgl port (AI-assisted, DKGL_TODO §7.0 E): run the per-frame bucket setup
+  // (set_up_common_data_from_dma) + tree setup, but draw NOTHING. The native TieDk draws
+  // the NORMAL + NORMAL_ENVMAP categories on this bucket; the dkgl Tie3AnotherCategory
+  // buckets (TRANS / TRANS_ENVMAP / WATER / WATER_ENVMAP) reuse this setup through
+  // render_from_another, which still accepts it because frame_idx is stamped as usual.
+  void render_setup_only(DmaFollower& dma, SharedRenderState* render_state,
+                         ScopedProfilerNode& prof);
+  // §7.0 E HW debug (AI-assisted): gk_dkgl_noenvmap2.txt -- keep the etie_base draw, drop
+  // only the additive envmap second pass. Triage A/B for the 98878af1 build, where bucket
+  // 266 (ETIE_W_L1_WATER) burned ~15.6 ms/frame GPU while its plain-water twin 265 stayed
+  // under 0.14 ms with the same geometry and visibility.
+  void set_draw_envmap_second_draw(bool v) { m_draw_envmap_second_draw = v; }
   void draw_debug_window() override;
   void init_shaders(ShaderLibrary& shaders) override;
   ~Tie3();
@@ -133,6 +146,10 @@ class Tie3 : public BucketRenderer {
     TieProtoVisibility proto_visibility;
 
     std::vector<std::pair<int, int>> draw_idx_temp;
+    // §7.0 I (AI-assisted): setup-only mode -- 1 = draw in a category this Tie3 draws
+    // (TRANS / WATER / their envmap passes); NORMAL* draws belong to the native TieDk.
+    std::vector<u8> setup_only_draws;
+    bool setup_only_any = false;
     std::vector<u32> index_temp;
     std::vector<u8> vis_temp;
     std::vector<std::pair<int, int>> multidraw_offset_per_stripdraw;
@@ -160,6 +177,7 @@ class Tie3 : public BucketRenderer {
   bool m_debug_all_visible = false;
   bool m_hide_wind = false;
   bool m_draw_envmap_second_draw = true;
+  bool m_setup_only = false;  // §7.0 I: set by render_setup_only
 
   TfragPcPortData m_pc_port_data;
 

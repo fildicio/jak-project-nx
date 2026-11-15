@@ -27,6 +27,9 @@ PROGRAMS = ["ocean_common", "ocean_envmap", "ocean_envmap_haze",
             "eye",  # #19: GL EyeRenderer (render-to-texture eyes) through dkgl
             "tex_anim",  # T125: GL TextureAnimator (jak2 skull gems) through dkgl
             "tfrag3",  # §7.0 D: jak2 tfrag WATER buckets (GL TFragment) through dkgl
+            # §7.0 E: jak2 tie TRANS/TRANS_ENVMAP/WATER/WATER_ENVMAP buckets
+            # (GL Tie3AnotherCategory) through dkgl
+            "etie", "etie_base",
             # T126: GL GlowRenderer (jak2 light glows) through dkgl
             "glow_depth_copy", "glow_probe_on_grid", "glow_probe_downsample", "glow_draw",
             # T127: GL Sprite3::render_distorter (jak2 scattergun heat haze) through dkgl

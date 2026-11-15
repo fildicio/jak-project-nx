@@ -389,6 +389,9 @@ TEST(DkglState, ProgramHintIdentity) {
   ASSERT_NE(p, 0u);
   ASSERT_NE(program_table(p), nullptr) << "ocean_common must be in the T103 table";
   EXPECT_STREQ(program_table(p)->program_name, "ocean_common");
+  // §7.0 E: the tie category programs joined the table (GL Tie3AnotherCategory)
+  EXPECT_NE(program_table(build_hinted_program("etie")), nullptr);
+  EXPECT_NE(program_table(build_hinted_program("etie_base")), nullptr);
   // inert: name not in the T103 table -> draws nothing, but nothing crashes
   // ("tfrag3" joined the table with §7.0 D, so probe with a name that stays unmapped)
   const u32 p2 = build_hinted_program("some-unmapped-program");

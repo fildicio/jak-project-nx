@@ -51,6 +51,7 @@
 #include "game/graphics/opengl_renderer/foreground/Merc2BucketRenderer.h"
 #include "game/graphics/opengl_renderer/TextureAnimator.h"  // T125: jak2 skull gems via dkgl
 #include "game/graphics/opengl_renderer/background/TFragment.h"  // §7.0 D: tfrag water
+#include "game/graphics/opengl_renderer/background/Tie3.h"  // §7.0 E: tie trans/water cats
 #include "game/graphics/opengl_renderer/sprite/GlowRenderer.h"  // T126: jak2 glows via dkgl
 #include "game/graphics/opengl_renderer/dma_helpers.h"  // T127: distort unpack_to_* helpers
 #include "game/graphics/opengl_renderer/loader/GpuBufferPool.h"
@@ -100,6 +101,10 @@ extern float g_shadow2_darken_scale;  // Shadow2.cpp (gk_dkgl_darkshadow.txt)
 #include "dksh/dkgl_tex_anim_vert_dksh.h"
 #include "dksh/dkgl_tfrag3_frag_dksh.h"  // §7.0 D: tfrag water (GL TFragment)
 #include "dksh/dkgl_tfrag3_vert_dksh.h"
+#include "dksh/dkgl_etie_frag_dksh.h"  // §7.0 E: tie envmap 2nd pass (GL Tie3AnotherCategory)
+#include "dksh/dkgl_etie_vert_dksh.h"
+#include "dksh/dkgl_etie_base_frag_dksh.h"  // §7.0 E: tie envmap base draw
+#include "dksh/dkgl_etie_base_vert_dksh.h"
 #include "dksh/dkgl_glow_depth_copy_frag_dksh.h"  // T126: GlowRenderer (jak2 light glows)
 #include "dksh/dkgl_glow_depth_copy_vert_dksh.h"
 #include "dksh/dkgl_glow_draw_frag_dksh.h"
@@ -124,6 +129,8 @@ extern float g_shadow2_darken_scale;  // Shadow2.cpp (gk_dkgl_darkshadow.txt)
 #include "dksh/dkgl_sprite_distort_frag_jak2_dksh.h"  // T127: frag SCISSOR_HEIGHT 416
 #include "dksh/dkgl_sprite_distort_vert_jak2_dksh.h"
 #include "dksh/dkgl_tfrag3_vert_jak2_dksh.h"  // §7.0 D: tfrag water vert HEIGHT_SCALE 0.5
+#include "dksh/dkgl_etie_vert_jak2_dksh.h"  // §7.0 E: tie envmap vert HEIGHT_SCALE 0.5
+#include "dksh/dkgl_etie_base_vert_jak2_dksh.h"  // §7.0 E: tie envmap base vert
 
 #include "game/switch/run_log.h"
 
@@ -319,7 +326,28 @@ constexpr int kJak2Count = sizeof(kJak2Buckets) / sizeof(kJak2Buckets[0]);
 // (lcom-pris2 has no GL renderer). GL's TextureUploadHandler draws eyes in all of them, so
 // init_jak2 merges these 40 into the table as PrisTexEyes lists.
 constexpr int kJak2EyeTexCount = 6 * 6 + 4;
-constexpr int kJak2TableMax = kJak2Count + kJak2EyeTexCount;
+// §7.0 E (AI-assisted): the tie buckets GL registers Tie3 renderers on. The 24 category
+// buckets (TIE_T/ETIE_T alpha, TIE_W/ETIE_W water) carry EMPTY chains -- all data comes
+// from the level's Tie3 master on TIE_L{n}_TFRAG, which is why the masters are in the
+// table too (their chain holds the per-frame setup). Stride arithmetic = GL
+// GET_BUCKET_ID_FOR_LIST, so the ids cannot drift from init_bucket_renderers_jak2.
+constexpr int jak2_tie_lvl(jak2::BucketId a, jak2::BucketId b, int i) {
+  return (int)a + ((int)b - (int)a) * i;
+}
+bool is_jak2_tie_bucket(int b) {
+  for (int l = 0; l < 6; l++) {
+    if (b == jak2_tie_lvl(jak2::BucketId::TIE_L0_TFRAG, jak2::BucketId::TIE_L1_TFRAG, l) ||
+        b == jak2_tie_lvl(jak2::BucketId::TIE_T_L0_ALPHA, jak2::BucketId::TIE_T_L1_ALPHA, l) ||
+        b == jak2_tie_lvl(jak2::BucketId::ETIE_T_L0_ALPHA, jak2::BucketId::ETIE_T_L1_ALPHA, l) ||
+        b == jak2_tie_lvl(jak2::BucketId::TIE_W_L0_WATER, jak2::BucketId::TIE_W_L1_WATER, l) ||
+        b == jak2_tie_lvl(jak2::BucketId::ETIE_W_L0_WATER, jak2::BucketId::ETIE_W_L1_WATER, l)) {
+      return true;
+    }
+  }
+  return false;
+}
+constexpr int kJak2TieExtra = 5 * 6;  // 6 masters + 4 categories x 6 levels
+constexpr int kJak2TableMax = kJak2Count + kJak2EyeTexCount + kJak2TieExtra;
 constexpr int kMaxBuckets = kJak1Count > kJak2TableMax ? kJak1Count : kJak2TableMax;
 int s_jak2_ids[kJak2TableMax];
 // The active table (selected in init; defaults to jak1 so the file is safe pre-init).
@@ -336,6 +364,17 @@ int list_index(int bucket) {
   return -1;
 }
 int s_cur_bucket = -1;
+// §7.0 E HW debug (AI-assisted): per-bucket draw/index census. The tie category buckets
+// draw through the shared emitter like everything else; on the 98878af1 HW run bucket 266
+// (ETIE_W_L1_WATER) burned ~15.6 ms/frame of GPU while its plain-water twin 265 (same
+// geometry, same visibility, tfrag3 single pass) stayed under 0.14 ms. The counts below
+// discriminate "far too many draws" (category-range bug) from "degenerate index counts"
+// (vertex/index bug). Totals accumulate between census lines and reset on each.
+u64 s_census_draws[kMaxBuckets] = {};
+u64 s_census_idx[kMaxBuckets] = {};
+u32 s_census_idx_max[kMaxBuckets] = {};
+int s_tie_census_idx[5 * 6];  // §7.0 E: master + 4 category list indexes per level
+int s_tie_census_n = 0;
 bool s_seg_open = false;
 bool s_seg_frame = false;
 u32 s_color_mask = DkColorMask_RGBA;  // T113: last glColorMask emitted (segments re-apply it)
@@ -465,6 +504,15 @@ ProgramShaders s_programs[] = {
     // selected on Switch (the water trees always have a tod palette).
     {"tfrag3", dkgl_tfrag3_vert_dksh, dkgl_tfrag3_vert_dksh_size, dkgl_tfrag3_frag_dksh,
      dkgl_tfrag3_frag_dksh_size, {}, {}, false},
+    // §7.0 E (AI-assisted): jak2 tie TRANS/TRANS_ENVMAP/WATER/WATER_ENVMAP buckets -- the
+    // GL Tie3AnotherCategory running unchanged through dkgl. TRANS/WATER base draws use
+    // tfrag3 (above); the envmap base draws use etie_base and the additive envmap second
+    // pass uses etie. tie_wind is never selected (wind draws only happen in the native
+    // NORMAL pass).
+    {"etie", dkgl_etie_vert_dksh, dkgl_etie_vert_dksh_size, dkgl_etie_frag_dksh,
+     dkgl_etie_frag_dksh_size, {}, {}, false},
+    {"etie_base", dkgl_etie_base_vert_dksh, dkgl_etie_base_vert_dksh_size,
+     dkgl_etie_base_frag_dksh, dkgl_etie_base_frag_dksh_size, {}, {}, false},
     // T126: GlowRenderer (new_mode path: depth copy, probe on grid, downsample, draw)
     {"glow_depth_copy", dkgl_glow_depth_copy_vert_dksh, dkgl_glow_depth_copy_vert_dksh_size,
      dkgl_glow_depth_copy_frag_dksh, dkgl_glow_depth_copy_frag_dksh_size, {}, {}, false},
@@ -505,6 +553,8 @@ const Jak2Vert kJak2Verts[] = {
     {"sprite_distort", dkgl_sprite_distort_vert_jak2_dksh,
      dkgl_sprite_distort_vert_jak2_dksh_size},  // T127
     {"tfrag3", dkgl_tfrag3_vert_jak2_dksh, dkgl_tfrag3_vert_jak2_dksh_size},  // §7.0 D
+    {"etie", dkgl_etie_vert_jak2_dksh, dkgl_etie_vert_jak2_dksh_size},  // §7.0 E
+    {"etie_base", dkgl_etie_base_vert_jak2_dksh, dkgl_etie_base_vert_jak2_dksh_size},  // §7.0 E
 };
 
 // T127: sprite_distort.frag also differs per game (SCISSOR_HEIGHT), so the frag blob is
@@ -795,11 +845,25 @@ class SwitchEmitter final : public Emitter {
   }
   void draw_arrays(DkPrimitive prim, u32 first, u32 count) override {
     if (s_recording) {
+      if (s_cur_bucket >= 0) {  // §7.0 E census
+        s_census_draws[s_cur_bucket]++;
+        s_census_idx[s_cur_bucket] += count;
+        if (count > s_census_idx_max[s_cur_bucket]) {
+          s_census_idx_max[s_cur_bucket] = count;
+        }
+      }
       dkCmdBufDraw(s_cb, prim, count, 1, first, 0);
     }
   }
   void draw_elements(DkPrimitive prim, u32 count, u32 index_offset_bytes) override {
     if (s_recording) {
+      if (s_cur_bucket >= 0) {  // §7.0 E census
+        s_census_draws[s_cur_bucket]++;
+        s_census_idx[s_cur_bucket] += count;
+        if (count > s_census_idx_max[s_cur_bucket]) {
+          s_census_idx_max[s_cur_bucket] = count;
+        }
+      }
       const u32 isz = m_idx_fmt == DkIdxFormat_Uint16 ? 2 : 4;
       dkCmdBufDrawIndexed(s_cb, prim, count, 1, index_offset_bytes / isz, 0, 0);
     }
@@ -846,6 +910,23 @@ std::unique_ptr<DirectRenderer> s_debug3;
 std::unique_ptr<Warp> s_warp;  // T128: jak2 gmerc-warp 317
 std::unique_ptr<BlitDisplays> s_blit;  // §7.0 C: jak2 bucket 3 (menu backdrop = last frame)
 std::unique_ptr<TFragment> s_water_tfrags[6];  // §7.0 D: jak2 tfrag-w-l{0..5}-water
+
+// §7.0 E (AI-assisted): jak2 tie categories. The master Tie3 runs on the TIE_L{n}_TFRAG
+// bucket (setup only -- the native TieDk draws NORMAL + wind there), and the four
+// Tie3AnotherCategory buckets (TIE_T/ETIE_T alpha, TIE_W/ETIE_W water) draw through
+// render_from_another, exactly like GL init_bucket_renderers_jak2 -- except the master
+// itself draws nothing.
+class Tie3SetupOnly final : public Tie3 {
+ public:
+  using Tie3::Tie3;
+  void render(DmaFollower& dma, SharedRenderState* render_state,
+              ScopedProfilerNode& prof) override {
+    render_setup_only(dma, render_state, prof);
+  }
+};
+std::unique_ptr<Tie3> s_tie_masters[6];                    // tie-l{0..5}-tfrag
+std::unique_ptr<Tie3AnotherCategory> s_tie_cats[4][6];     // TRANS/TRANS_ENV/WATER/WATER_ENV
+
 
 // #19 (AI-assisted): jak1 eye.gc puts each level's NPC eyes in that level's pris-tex bucket
 // (48 / 51), right after the page holding their iris/pupil/lid; only common characters (Jak,
@@ -1233,8 +1314,9 @@ bool init_jak2_foreground(TexturePool* pool, int loaded) {
   int eye_lists = 0;
   for (int i = 0; i < s_bucket_count; i++) {
     const int b = s_bucket_ids[i];
-    const bool listed = std::find(kJak2Buckets, kJak2Buckets + kJak2Count, b) !=
-                        kJak2Buckets + kJak2Count;
+    const bool listed = (std::find(kJak2Buckets, kJak2Buckets + kJak2Count, b) !=
+                         kJak2Buckets + kJak2Count) ||
+                        is_jak2_tie_bucket(b);  // §7.0 E: tie master/category buckets
     if (!listed) {  // the merged-in tex buckets (init_jak2)
       snprintf(name, sizeof(name), "tex-eyes-%d", b);
       s_jak2_tex_eyes.push_back(std::make_unique<PrisTexEyes>(name, b));
@@ -1326,6 +1408,73 @@ bool init_jak2_foreground(TexturePool* pool, int loaded) {
                       bucket, l);
     }
   }
+  // §7.0 E (AI-assisted): the tie TRANS / TRANS_ENVMAP / WATER / WATER_ENVMAP buckets. GL
+  // registers a Tie3 master on TIE_L{n}_TFRAG (which also draws NORMAL) plus a
+  // Tie3AnotherCategory per category bucket. On Switch the native TieDk draws NORMAL +
+  // NORMAL_ENVMAP on the master's bucket, so the dkgl master is a Tie3SetupOnly (setup,
+  // no draw) and only the four categories draw, through tfrag3 / etie_base / etie -- the
+  // same shared draw path (setup_tfrag_shader + per-draw elements) as the §7.0 D tfrag
+  // water, which already runs. A/B flag: gk_dkgl_notie.txt.
+  int tie_masters = 0, tie_cats = 0;
+  if (!flag("gk_dkgl_notie.txt")) {
+    const struct {
+      jak2::BucketId a, b;
+      const char* pattern;
+      tfrag3::TieCategory cat;
+    } cats[] = {
+        {jak2::BucketId::TIE_T_L0_ALPHA, jak2::BucketId::TIE_T_L1_ALPHA, "tie-t-l%d-alpha",
+         tfrag3::TieCategory::TRANS},
+        {jak2::BucketId::ETIE_T_L0_ALPHA, jak2::BucketId::ETIE_T_L1_ALPHA, "etie-t-l%d-alpha",
+         tfrag3::TieCategory::TRANS_ENVMAP},
+        {jak2::BucketId::TIE_W_L0_WATER, jak2::BucketId::TIE_W_L1_WATER, "tie-w-l%d-water",
+         tfrag3::TieCategory::WATER},
+        {jak2::BucketId::ETIE_W_L0_WATER, jak2::BucketId::ETIE_W_L1_WATER, "etie-w-l%d-water",
+         tfrag3::TieCategory::WATER_ENVMAP},
+    };
+    for (int l = 0; l < 6; l++) {
+      const int mb = lvl(jak2::BucketId::TIE_L0_TFRAG, jak2::BucketId::TIE_L1_TFRAG, l);
+      const int mi = list_index(mb);
+      if (mi < 0) {
+        switch_run_logf("[dkgl] jak2: bucket %d (tie-l%d-tfrag master) missing from the table",
+                        mb, l);
+        continue;
+      }
+      snprintf(name, sizeof(name), "tie-l%d-tfrag", l);
+      s_tie_masters[l] = std::make_unique<Tie3SetupOnly>(name, mb, l, &s_jak2_anim_slots,
+                                                         tfrag3::TieCategory::NORMAL);
+      s_tie_masters[l]->init_shaders(s_srs->shaders);
+      // §7.0 E HW debug: gk_dkgl_noenvmap2.txt drops only the additive envmap second pass
+      // (the etie_base draw stays). A/B for the 266-vs-265 GPU asymmetry.
+      if (flag("gk_dkgl_noenvmap2.txt")) {
+        s_tie_masters[l]->set_draw_envmap_second_draw(false);
+      }
+      s_renderers[mi] = s_tie_masters[l].get();
+      if (s_tie_census_n < (int)(sizeof(s_tie_census_idx) / sizeof(s_tie_census_idx[0]))) {
+        s_tie_census_idx[s_tie_census_n++] = mi;  // §7.0 E census: master first
+      }
+      tie_masters++;
+      for (int c = 0; c < 4; c++) {
+        const int bucket = lvl(cats[c].a, cats[c].b, l);
+        const int i = list_index(bucket);
+        if (i < 0) {
+          switch_run_logf("[dkgl] jak2: bucket %d (%s) missing from the table", bucket,
+                          cats[c].pattern);
+          continue;
+        }
+        snprintf(name, sizeof(name), cats[c].pattern, l);
+        s_tie_cats[c][l] =
+            std::make_unique<Tie3AnotherCategory>(name, bucket, s_tie_masters[l].get(),
+                                                  cats[c].cat);
+        s_renderers[i] = s_tie_cats[c][l].get();
+        if (s_tie_census_n < (int)(sizeof(s_tie_census_idx) / sizeof(s_tie_census_idx[0]))) {
+          s_tie_census_idx[s_tie_census_n++] = i;  // §7.0 E census: 4 categories after
+        }
+        tie_cats++;
+      }
+    }
+    switch_run_logf("[dkgl] jak2 tie categories: %d masters + %d category buckets",
+                    tie_masters, tie_cats);
+  }
   add_merc((int)jak2::BucketId::MERC_LCOM_TFRAG, "merc-lcom-tfrag", 0);
   add_generic((int)jak2::BucketId::GMERC_LCOM_TFRAG, "gmerc-lcom-tfrag", 0,
               Generic2::Mode::NORMAL);
@@ -1395,6 +1544,15 @@ bool init_jak2(TexturePool* pool, Loader* loader, int loaded) {
     for (auto b : {jak2::BucketId::TEX_LCOM_TFRAG, jak2::BucketId::TEX_LCOM_SHRUB,
                    jak2::BucketId::TEX_LCOM_PRIS, jak2::BucketId::TEX_LCOM_WATER}) {
       s_jak2_ids[n++] = (int)b;
+    }
+    // §7.0 E: the tie master + category buckets (stride arithmetic like GL). Must match
+    // is_jak2_tie_bucket / init_jak2_foreground exactly -- the sorted walk is GL order.
+    for (int l = 0; l < 6; l++) {
+      s_jak2_ids[n++] = lvl(jak2::BucketId::TIE_L0_TFRAG, jak2::BucketId::TIE_L1_TFRAG, l);
+      s_jak2_ids[n++] = lvl(jak2::BucketId::TIE_T_L0_ALPHA, jak2::BucketId::TIE_T_L1_ALPHA, l);
+      s_jak2_ids[n++] = lvl(jak2::BucketId::ETIE_T_L0_ALPHA, jak2::BucketId::ETIE_T_L1_ALPHA, l);
+      s_jak2_ids[n++] = lvl(jak2::BucketId::TIE_W_L0_WATER, jak2::BucketId::TIE_W_L1_WATER, l);
+      s_jak2_ids[n++] = lvl(jak2::BucketId::ETIE_W_L0_WATER, jak2::BucketId::ETIE_W_L1_WATER, l);
     }
     std::sort(s_jak2_ids, s_jak2_ids + n);
     s_bucket_ids = s_jak2_ids;
@@ -2252,6 +2410,37 @@ void capture_end() {
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
         (unsigned long long)s_glow_bad, (unsigned long long)s_distort_draws,
         (unsigned long long)s_distort_bad);
+    // §7.0 E census (AI-assisted): one line per tie level, master + the 4 category buckets.
+    // d = draws, i = indices (k/M suffix), x = largest single draw, all totals since the
+    // previous census line. ETIE_W_* drawing far more draws/indices than its TIE_W_* twin
+    // with the same visibility = the 98878af1 city bug; the split tells us which half.
+    if (s_tie_census_n > 0) {
+      static u64 s_tie_census_frames = 0;  // s_captures at the previous tie census line
+      const u64 tie_delta = s_captures - s_tie_census_frames;
+      s_tie_census_frames = s_captures;
+      static const char* kCatTag[5] = {"m", "t", "et", "w", "ew"};
+      for (int l = 0; l * 5 < s_tie_census_n; l++) {
+        char line[512];
+        int off = snprintf(line, sizeof(line), "[dkgl] tie census L%d (+%llu frames):", l,
+                           (unsigned long long)tie_delta);
+        for (int c = 0; c < 5 && l * 5 + c < s_tie_census_n; c++) {
+          const int idx = s_tie_census_idx[l * 5 + c];
+          const u64 d = s_census_draws[idx], i = s_census_idx[idx];
+          const u32 x = s_census_idx_max[idx];
+          if (off > 0 && (size_t)off < sizeof(line)) {
+            off += snprintf(line + off, sizeof(line) - off, " %s%d d=%llu i=%llu.%02lu%c x=%lu",
+                            kCatTag[c], s_bucket_ids[idx], (unsigned long long)d,
+                            (unsigned long long)(i / 1000),
+                            (unsigned long)((i % 1000) / 10), i >= 1000 ? 'k' : ' ',
+                            (unsigned long)x);
+          }
+          s_census_draws[idx] = 0;
+          s_census_idx[idx] = 0;
+          s_census_idx_max[idx] = 0;
+        }
+        switch_run_logf("%s", line);
+      }
+    }
   }
 }
 

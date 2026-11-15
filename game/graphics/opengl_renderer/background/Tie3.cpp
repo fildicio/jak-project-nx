@@ -120,6 +120,7 @@ void Tie3::load_from_fr3_data(const LevelData* loader_data) {
       // OpenGL index buffer (fixed index buffer for multidraw system)
       lod_tree[l_tree].index_buffer = loader_data->tie_data[l_geo][l_tree].index_buffer;
       lod_tree[l_tree].category_draw_indices = tree.category_draw_indices;
+      lod_tree[l_tree].setup_only_draws.clear();  // §7.0 I: rebuilt on next setup
       lod_tree[l_tree].draw_mode = tree.use_strips ? GL_TRIANGLE_STRIP : GL_TRIANGLES;
 
       // set up vertex attributes
@@ -393,6 +394,25 @@ void Tie3::render(DmaFollower& dma, SharedRenderState* render_state, ScopedProfi
   }
 }
 
+// Switch dkgl port (AI-assisted, DKGL_TODO §7.0 E): see Tie3.h. Identical to render()
+// minus draw_matching_draws_for_all_trees -- the native TieDk pass owns this bucket's
+// NORMAL (+ wind) draws, and the category buckets draw later through render_from_another.
+void Tie3::render_setup_only(DmaFollower& dma, SharedRenderState* render_state,
+                             ScopedProfilerNode& prof) {
+  if (!m_enabled) {
+    while (dma.current_tag_offset() != render_state->next_bucket) {
+      dma.read_and_advance();
+    }
+    return;
+  }
+
+  m_setup_only = true;
+  if (set_up_common_data_from_dma(dma, render_state)) {
+    setup_all_trees(lod(), m_common_data.settings, m_common_data.proto_vis_data,
+                    m_common_data.proto_vis_data_size, !render_state->no_multidraw, prof);
+  }
+}
+
 void Tie3::render_from_another(SharedRenderState* render_state,
                                ScopedProfilerNode& prof,
                                tfrag3::TieCategory category) {
@@ -435,6 +455,32 @@ void Tie3::setup_tree(int idx,
   // don't render if we haven't loaded
   if (!m_has_level) {
     return;
+  }
+
+  // §7.0 I (AI-assisted): the setup-only master (Switch dkgl) only feeds the TRANS / WATER
+  // category buckets; the native TieDk already culls + indexes the NORMAL* draws. Skip
+  // trees without such draws, and leave the NORMAL* draws out of the index list.
+  const u8* draw_enabled = nullptr;
+  if (m_setup_only) {
+    if (tree.setup_only_draws.size() != tree.draws->size()) {
+      tree.setup_only_draws.assign(tree.draws->size(), 0);
+      tree.setup_only_any = false;
+      for (int c = 0; c < tfrag3::kNumTieCategories; c++) {
+        const auto cat = (tfrag3::TieCategory)c;
+        if (cat == tfrag3::TieCategory::NORMAL || cat == tfrag3::TieCategory::NORMAL_ENVMAP ||
+            cat == tfrag3::TieCategory::NORMAL_ENVMAP_SECOND_DRAW) {
+          continue;
+        }
+        for (u32 d = tree.category_draw_indices[c]; d < tree.category_draw_indices[c + 1]; d++) {
+          tree.setup_only_draws[d] = 1;
+          tree.setup_only_any = true;
+        }
+      }
+    }
+    if (!tree.setup_only_any) {
+      return;
+    }
+    draw_enabled = tree.setup_only_draws.data();
   }
 
   // FIX 36 Task 2 (AI-assisted): sub-phase timers -> [tie] line of the
@@ -529,11 +575,11 @@ void Tie3::setup_tree(int idx,
         if (tree.has_proto_visibility) {
           idx_buffer_size = make_index_list_from_vis_and_proto_string(
               tree.draw_idx_temp.data(), tree.index_temp.data(), *tree.draws, tree.vis_temp,
-              tree.proto_visibility.vis_flags, tree.index_data, &num_tris);
+              tree.proto_visibility.vis_flags, tree.index_data, &num_tris, draw_enabled);
         } else {
           idx_buffer_size = make_index_list_from_vis_string(
               tree.draw_idx_temp.data(), tree.index_temp.data(), *tree.draws, tree.vis_temp,
-              tree.index_data, &num_tris);
+              tree.index_data, &num_tris, draw_enabled);
         }
       }
       fx_idx_ms = fx_idx_timer.getMs();

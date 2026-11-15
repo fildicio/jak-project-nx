@@ -25,6 +25,7 @@ const std::vector<std::string> kPrograms = {
     "direct_basic", "direct_basic_textured", "solid_color", "emerc", "merc2", "eye",
     "tex_anim",  // T125: GL TextureAnimator (jak2 skull gems)
     "tfrag3",  // §7.0 D: GL TFragment (jak2 tfrag water)
+    "etie", "etie_base",  // §7.0 E: GL Tie3AnotherCategory (jak2 tie trans/water)
     "glow_depth_copy", "glow_probe_on_grid", "glow_probe_downsample", "glow_draw",  // T126
     "sprite_distort"};  // T127: GL Sprite3 distorter (jak2 scattergun heat haze)
 

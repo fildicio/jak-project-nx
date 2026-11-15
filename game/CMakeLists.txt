@@ -519,6 +519,9 @@ if(NINTENDO_SWITCH)
                       dkgl/eye.vert dkgl/eye.frag  # #19: eyes via dkgl
                       dkgl/tex_anim.vert dkgl/tex_anim.frag  # T125: TextureAnimator via dkgl
                       dkgl/tfrag3.vert dkgl/tfrag3.frag  # §7.0 D: tfrag water via dkgl
+                      # §7.0 E: tie TRANS/TRANS_ENVMAP/WATER/WATER_ENVMAP via dkgl
+                      dkgl/etie.vert dkgl/etie.frag
+                      dkgl/etie_base.vert dkgl/etie_base.frag
                       # T126: GlowRenderer (jak2 light glows) via dkgl
                       dkgl/glow_depth_copy.vert dkgl/glow_depth_copy.frag
                       dkgl/glow_probe_on_grid.vert dkgl/glow_probe_on_grid.frag
@@ -559,6 +562,8 @@ if(NINTENDO_SWITCH)
                       dkgl/emerc.vert dkgl/merc2.vert
                       dkgl/glow_depth_copy.vert dkgl/glow_draw.vert  # T126
                       dkgl/tfrag3.vert  # §7.0 D: tfrag water (vert HEIGHT_SCALE 0.5)
+                      # §7.0 E: tie category verts (same HEIGHT_SCALE 0.5 as tfrag3)
+                      dkgl/etie.vert dkgl/etie_base.vert
                       # T127: both stages of the distorter differ (vert HEIGHT_SCALE,
                       # frag SCISSOR_HEIGHT)
                       dkgl/sprite_distort.vert dkgl/sprite_distort.frag)

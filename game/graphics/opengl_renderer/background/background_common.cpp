@@ -793,10 +793,15 @@ u32 make_index_list_from_vis_string(std::pair<int, int>* group_out,
                                     const std::vector<tfrag3::StripDraw>& draws,
                                     const std::vector<u8>& vis_data,
                                     const u32* idx_in,
-                                    u32* num_tris_out) {
+                                    u32* num_tris_out,
+                                    const u8* draw_enabled) {
   int idx_buffer_ptr = 0;
   u32 num_tris = 0;
   for (size_t i = 0; i < draws.size(); i++) {
+    if (draw_enabled && !draw_enabled[i]) {  // Switch dkgl: draw owned by another renderer
+      group_out[i] = {idx_buffer_ptr, 0};
+      continue;
+    }
     const auto& draw = draws[i];
     int vtx_idx = 0;
     std::pair<int, int> ds;
@@ -849,10 +854,15 @@ u32 make_index_list_from_vis_and_proto_string(std::pair<int, int>* group_out,
                                               const std::vector<u8>& vis_data,
                                               const std::vector<u8>& proto_vis_data,
                                               const u32* idx_in,
-                                              u32* num_tris_out) {
+                                              u32* num_tris_out,
+                                              const u8* draw_enabled) {
   int idx_buffer_ptr = 0;
   u32 num_tris = 0;
   for (size_t i = 0; i < draws.size(); i++) {
+    if (draw_enabled && !draw_enabled[i]) {  // Switch dkgl: draw owned by another renderer
+      group_out[i] = {idx_buffer_ptr, 0};
+      continue;
+    }
     const auto& draw = draws[i];
     int vtx_idx = 0;
     std::pair<int, int> ds;

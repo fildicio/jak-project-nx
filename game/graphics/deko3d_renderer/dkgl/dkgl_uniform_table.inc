@@ -183,6 +183,41 @@ inline constexpr UniformSlot kSlots_tfrag3_frag[] = {
     {"fog_color", 32, 16},
     {"gfx_hack_no_tex", 48, 16},
 };
+inline constexpr UniformSlot kSlots_etie_vert[] = {
+    {"hvdf_offset", 0, 16},
+    {"camera", 16, 64},
+    {"fog_constant", 80, 16},
+    {"fog_min", 96, 16},
+    {"fog_max", 112, 16},
+    {"envmap_tod_tint", 128, 16},
+    {"decal", 144, 16},
+    {"persp0", 160, 16},
+    {"persp1", 176, 16},
+    {"cam_no_persp", 192, 64},
+};
+inline constexpr UniformSlot kSlots_etie_frag[] = {
+    {"alpha_min", 0, 16},
+    {"alpha_max", 16, 16},
+    {"fog_color", 32, 16},
+    {"gfx_hack_no_tex", 48, 16},
+};
+inline constexpr UniformSlot kSlots_etie_base_vert[] = {
+    {"hvdf_offset", 0, 16},
+    {"camera", 16, 64},
+    {"fog_constant", 80, 16},
+    {"fog_min", 96, 16},
+    {"fog_max", 112, 16},
+    {"decal", 128, 16},
+    {"persp0", 144, 16},
+    {"persp1", 160, 16},
+    {"cam_no_persp", 176, 64},
+};
+inline constexpr UniformSlot kSlots_etie_base_frag[] = {
+    {"alpha_min", 0, 16},
+    {"alpha_max", 16, 16},
+    {"fog_color", 32, 16},
+    {"gfx_hack_no_tex", 48, 16},
+};
 inline constexpr UniformSlot kSlots_glow_depth_copy_vert[] = {
     {nullptr, 0, 0},
 };
@@ -300,6 +335,16 @@ inline constexpr ProgramUniformTable kProgramUniformTables[] = {
           { kSlots_tfrag3_vert, 8, 224 },
       // frag
           { kSlots_tfrag3_frag, 4, 64 }, },
+    { "etie",
+      // vert
+          { kSlots_etie_vert, 10, 256 },
+      // frag
+          { kSlots_etie_frag, 4, 64 }, },
+    { "etie_base",
+      // vert
+          { kSlots_etie_base_vert, 9, 240 },
+      // frag
+          { kSlots_etie_base_frag, 4, 64 }, },
     { "glow_depth_copy",
       // vert
           { kSlots_glow_depth_copy_vert, 0, 0 },

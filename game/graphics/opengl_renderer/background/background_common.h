@@ -111,7 +111,8 @@ u32 make_index_list_from_vis_string(std::pair<int, int>* group_out,
                                     const std::vector<tfrag3::StripDraw>& draws,
                                     const std::vector<u8>& vis_data,
                                     const u32* idx_in,
-                                    u32* num_tris_out);
+                                    u32* num_tris_out,
+                                    const u8* draw_enabled = nullptr);
 
 u32 make_all_visible_index_list(std::pair<int, int>* group_out,
                                 u32* idx_out,
@@ -131,4 +132,5 @@ u32 make_index_list_from_vis_and_proto_string(std::pair<int, int>* group_out,
                                               const std::vector<u8>& vis_data,
                                               const std::vector<u8>& proto_vis_data,
                                               const u32* idx_in,
-                                              u32* num_tris_out);
+                                              u32* num_tris_out,
+                                              const u8* draw_enabled = nullptr);
