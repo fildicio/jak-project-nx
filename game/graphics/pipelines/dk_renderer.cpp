@@ -856,17 +856,20 @@ void dk_loader_start() {
   // T51 breadcrumbs: the T49 run froze silently inside this function.
   switch_run_logf("[dk] dk-loader step 1/3: TexturePool (placeholder upload)");
   s_dk_tex_pool = std::make_unique<TexturePool>(g_game_version);
-  // FIX 124 (AI-assisted): draw-stamp eviction guard (PS2 semantics, see the
-  // TexturePool.h FIX 124 block): a page drawn within the window keeps its GPU
-  // id while its level unloads, and the unload retries once it goes idle.
+  // FIX 124 + FIX 125 (AI-assisted): draw-stamp eviction guard (PS2 semantics,
+  // see the TexturePool.h FIX 124/125 block): a page drawn within the idle
+  // window keeps its GPU id while its level unloads, and the unload retries
+  // once it goes idle. The window is kPoolDeferFrames (~60 s) -- 120 frames
+  // was proven too short on hardware ([sprtex] MISS ~35 s after release).
   // gk_dkgl_nopooldefer.txt turns it off (old behavior).
   {
     char defer_path[96];
     snprintf(defer_path, sizeof(defer_path), "sdmc:/switch/%s/gk_dkgl_nopooldefer.txt",
              game_version_names[g_game_version]);
     const bool defer_on = access(defer_path, F_OK) != 0;
-    s_dk_tex_pool->set_defer_frames(defer_on ? 120 : 0);
-    switch_run_logf("[dk] pool defer unload %s", defer_on ? "ON (FIX124, 120 frames)" : "OFF (gk_dkgl_nopooldefer.txt)");
+    s_dk_tex_pool->set_defer_frames(
+        defer_on ? TexturePool::kPoolDeferFrames : 0);
+    switch_run_logf("[dk] pool defer unload %s", defer_on ? "ON (FIX124/125, 3600 frames)" : "OFF (gk_dkgl_nopooldefer.txt)");
   }
   const auto fr3 =
       file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] / "fr3";

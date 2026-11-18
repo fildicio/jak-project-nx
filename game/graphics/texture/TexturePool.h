@@ -333,9 +333,22 @@ class TexturePool {
   //    the unload is deferred.
   //  - defer_frames() == 0 (desktop, or gk_dkgl_nopooldefer.txt on Switch) is
   //    the old behavior exactly.
+  //
+  // ---- FIX 125 (AI-assisted): idle window tuning --------------------------------
+  // Hardware logs (gk_run_log, Nov 19) showed the 120-frame (2 s) window was
+  // too short: pages deferred at a transition released once idle, then the
+  // game drew them again ~35 s later ([sprtex] MISS tbp=930 pc=1021/9 at 85 s
+  // after release at 48.7 s) -- the black walls came back. kPoolDeferFrames
+  // holds every page touched in the last minute instead. Loader::update drops
+  // the window to kPoolDeferFramesPressure while the loader / dk texture heap
+  // is under pressure, so a tight heap still reclaims quickly.
   void tick_frame() { ++m_draw_frame; }
   void set_defer_frames(u32 frames) { m_defer_frames = frames; }
   u32 defer_frames() const { return m_defer_frames; }
+
+  // FIX 125: ~60 s idle at 60 fps (Switch default), pressure fallback ~2 s.
+  static constexpr u32 kPoolDeferFrames = 3600;
+  static constexpr u32 kPoolDeferFramesPressure = 120;
   void note_draw_id(u64 gpu_id);
   bool unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id);
   size_t retry_deferred_unloads(std::vector<u64>& out_released);

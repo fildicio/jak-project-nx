@@ -1170,6 +1170,31 @@
               (* (/ 1.0 (-> this speed-interp fog)) (seconds-per-frame))
               )
             (#when PC_PORT ;; og:preserve-this
+              ;; FIX 126 (AI-assisted): the cheat branches below pin
+              ;; current-interp directly, so turning a cheat OFF left the sky
+              ;; stuck at the forced values -- seek! only pulls current back
+              ;; toward target at 1/speed-interp, i.e. 30-120 real seconds of
+              ;; lingering storm after disabling "Bad Weather". Track the
+              ;; active cheat state and, on the OFF transition, snap
+              ;; current-interp back to the level's natural target.
+              (let ((new-cheat-state
+                      (the-as int
+                        (cond
+                          ((pc-cheats? (-> *pc-settings* cheats) weather-good) 2)
+                          ((pc-cheats? (-> *pc-settings* cheats) weather-bad) 1)
+                          (else 0)
+                          )
+                        )
+                      )
+                    )
+                (when (and (!= new-cheat-state (-> this weather-cheat-state))
+                           (zero? new-cheat-state)
+                           )
+                  (set! (-> this current-interp cloud) (-> this target-interp cloud))
+                  (set! (-> this current-interp fog) (-> this target-interp fog))
+                  )
+                (set! (-> this weather-cheat-state) new-cheat-state)
+                )
               (cond
                 ((pc-cheats? (-> *pc-settings* cheats) weather-good)
                   (set! (-> this current-interp cloud) 0.0)

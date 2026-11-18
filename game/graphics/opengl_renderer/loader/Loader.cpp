@@ -1950,6 +1950,26 @@ void Loader::update(TexturePool& texture_pool) {
   // garbage queue so the existing paced delete handles them; pages the game
   // still draws stay loaded. Desktop / kill-switch: defer_frames() is 0 and
   // nothing was ever queued -- this is skipped.
+#ifdef __SWITCH__
+  // FIX 125 (AI-assisted): idle-window pressure fallback. The normal window is
+  // TexturePool::kPoolDeferFrames (~60 s), set at pool creation. While the
+  // loader is under pressure or the dk texture heap has failed allocations,
+  // shrink it to kPoolDeferFramesPressure so the pool gives memory back in
+  // seconds instead of a minute. Only the render thread writes the window
+  // (this function and dk pool creation), so the plain store is safe.
+  {
+    static bool s_fix125_pressure = false;
+    const bool tex_pressure =
+        loader_under_pressure() || dktexgpu::failed_allocs() > 0;
+    if (tex_pressure != s_fix125_pressure) {
+      s_fix125_pressure = tex_pressure;
+      switch_run_logf("[loader] FIX125 pressure: pool defer window %s",
+                      tex_pressure ? "3600 -> 120 frames" : "back to 3600 frames");
+      texture_pool.set_defer_frames(tex_pressure ? TexturePool::kPoolDeferFramesPressure
+                                                  : TexturePool::kPoolDeferFrames);
+    }
+  }
+#endif
   if (texture_pool.defer_frames() > 0) {
     std::vector<u64> released;
     size_t outstanding;
