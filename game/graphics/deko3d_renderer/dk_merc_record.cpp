@@ -17,7 +17,7 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 namespace dkmerc {
 namespace {
 
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 constexpr uint32_t kParamUbo = 0x100;  // MercVertParams (208 B), padded
 
 // tfrag3::MercVertex (64 B): pos @0, normal @16, weights @32, st @48, rgba u8x4 @56,

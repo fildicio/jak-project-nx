@@ -71,12 +71,15 @@ struct Captured {
   std::vector<u8> proto_mask;  // jak2: hidden proto names (dk_proto_vis.h)
   bool valid = false;
 };
-// §7.2 phase 1: per-game bucket pick (defaults to jak1, like dkgl_frame.cpp). s_jak2
-// switches the DMA shape: no WindWork block (proto-vis packet instead) and the envmap
-// colour is /128 without the jak1 x2 (GL Tie3::set_up_common_data_from_dma).
+// §7.2 phase 1 (jak2) / J3 (jak3): per-game bucket pick (defaults to jak1, like
+// dkgl_frame.cpp). s_jak2_style = the gen-2 DMA shape (jak2 AND jak3): no WindWork block
+// (proto-vis packet instead) and the envmap colour is /128 without the jak1 x2 (GL
+// Tie3::set_up_common_data_from_dma). s_jak3 = jak3's extra alpha/water tie buckets.
 const int* s_buckets = dktie::kJak1Buckets;
 int s_pass_count = dktie::kNumPasses;
-bool s_jak2 = false;
+int s_ranges_per_pass = dktie::kRangesPerPass;
+bool s_jak2_style = false;
+bool s_jak3 = false;
 Captured s_cap[dktie::kMaxPasses];
 dktf::FrameDraws s_frame;
 
@@ -106,11 +109,12 @@ bool walk_bucket(const void* data, uint32_t slot, uint32_t next, Captured* out) 
   }
   memcpy(&out->pc, pc.data, sizeof(TfragPcPortData));
   out->pc.level_name[11] = '\0';
-  if (s_jak2) {
-    // §7.2 phase 1: jak2 has no WindWork block -- the next packet is the proto-vis mask
-    // (GL Tie3 setup_tree applies it to static draws; wind draws ignore it). GL's Tie3 keeps its
-    // zero-initialized WindWork and still runs render_tree_wind, so wind instances draw
-    // at rest -- mirror that instead of dropping them.
+  if (s_jak2_style) {
+    // §7.2 phase 1 (jak2) / J3 (jak3): the gen-2 games have no WindWork block -- the next
+    // packet is the proto-vis mask (GL Tie3 setup_tree applies it to static draws; wind
+    // draws ignore it). GL's Tie3 keeps its zero-initialized WindWork and still runs
+    // render_tree_wind, so wind instances draw at rest -- mirror that instead of dropping
+    // them.
     auto mask = d.read_and_advance();  // proto-vis mask (applied in build_frame)
     dkprotovis::copy_mask(mask.data, mask.size_bytes, &out->proto_mask);
     memset(&out->wind, 0, sizeof(WindWorkDk));
@@ -316,9 +320,9 @@ void capture_chain(const void* data, uint32_t start_offset) {
   }
   DmaFollower d(data, start_offset);
   uint32_t buckets_base;
-  if (s_jak2) {
-    // §7.2 phase 1: jak2 chains have no CALL head -- the bucket table starts at the
-    // offset itself (GL dispatch_buckets_jak2).
+  if (s_jak2_style) {
+    // §7.2 phase 1 (jak2) / J3 (jak3): gen-2 chains have no CALL head -- the bucket table
+    // starts at the offset itself (GL dispatch_buckets_jak2 / dispatch_buckets_jak3).
     buckets_base = d.current_tag_offset();
   } else {
     if (d.current_tag().kind != DmaTag::Kind::CALL) {
@@ -400,7 +404,7 @@ void build_frame(Loader* loader) {
     {
       float tint[4];
       for (int k = 0; k < 4; k++) {
-        tint[k] = s_cap[b].envmap[k] / 128.f * (s_jak2 ? 1.f : 2.f);
+        tint[k] = s_cap[b].envmap[k] / 128.f * (s_jak2_style ? 1.f : 2.f);
       }
       EtieParams ep;
       fill_etie(&ep, cam.rot[0].data(), cam.perspective[0].data(), cam.hvdf_off.data(),
@@ -493,7 +497,7 @@ void build_frame(Loader* loader) {
           c.tod_id = tod;
           c.strips = tree.use_strips;
           c.cam = (uint16_t)ci;
-          c.range = (uint8_t)(2 * b);  // §7.2 phase 1: normal+wind range of pass b
+          c.range = (uint8_t)(s_ranges_per_pass * b);  // §7.2 phase 1 / J3: normal+wind range of pass b
           dktf::fill_draw_state(draw.mode, &c);
           s_frame.draws.push_back(c);
           s_frame.wind_draws++;
@@ -514,15 +518,15 @@ void build_frame(Loader* loader) {
       if (vis.size() < tree.bvh.vis_nodes.size()) {
         vis.resize(tree.bvh.vis_nodes.size());
       }
-      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes, s_jak2 ? dktf::occlusion_string(b) : nullptr,
-                          vis.data());
+      cull_check_all_slow(cam.planes, tree.bvh.vis_nodes,
+                          s_jak2_style ? dktf::occlusion_string(b) : nullptr, vis.data());
       groups.resize(tree.static_draws.size());
       if (idx.size() < tree.unpacked.indices.size()) {  // T86: grow only (no per-tree zero-fill)
         idx.resize(tree.unpacked.indices.size());
       }
       u32 tris = 0;
       u32 n;
-      if (s_jak2 && tree.has_per_proto_visibility_toggle) {
+      if (s_jak2_style && tree.has_per_proto_visibility_toggle) {
         static std::unordered_map<const tfrag3::TieTree*, dkprotovis::Cache> s_pv;
         const auto& pv = dkprotovis::update(&s_pv[&tree], ld->load_id, tree.proto_names,
                                             s_cap[b].proto_mask);
@@ -547,7 +551,11 @@ void build_frame(Loader* loader) {
       // GL Tie3WithEnvmapJak1 order: NORMAL, wind, NORMAL_ENVMAP (ETIE_BASE shader: GL
       // Tie3.cpp:601-610 uses the envmap-style math for the base pass), then the shiny
       // NORMAL_ENVMAP_SECOND_DRAW with the ETIE shader (T77, etie >= 0).
-      auto add_category = [&](tfrag3::TieCategory cat, int8_t etie, int8_t etie_base = -1) {
+      // J3 (jak3): slot = the record range of this category's bucket (census §2). The
+      // gen-2 games with the default 2 ranges derive it from etie-ness like before; the
+      // jak3 alpha/water calls pass it explicitly (6 ranges per pass).
+      auto add_category = [&](tfrag3::TieCategory cat, int8_t etie, int8_t etie_base = -1,
+                              int slot = -1) {
       const size_t first = tree.category_draw_indices[(int)cat];
       const size_t last = tree.category_draw_indices[(int)cat + 1];
       for (size_t i = first; i < last && i < tree.static_draws.size(); i++) {
@@ -575,8 +583,11 @@ void build_frame(Loader* loader) {
         c.etie = etie;
         c.etie_base = etie_base;
         // §7.2 phase 1: NORMAL draws record at TIE_L{n}, the envmap base + shine draws
-        // at ETIE_L{n} (GL Tie3AnotherCategory) -- 2 record ranges per pass.
-        c.range = (uint8_t)(2 * b + ((etie >= 0 || etie_base >= 0) ? 1 : 0));
+        // at ETIE_L{n} (GL Tie3AnotherCategory) -- 2 record ranges per pass on jak2.
+        if (slot < 0) {
+          slot = (etie >= 0 || etie_base >= 0) ? 1 : 0;
+        }
+        c.range = (uint8_t)(s_ranges_per_pass * b + slot);
         dktf::fill_draw_state(draw.mode, &c);
         s_frame.draws.push_back(c);
         if (etie >= 0) {
@@ -588,26 +599,55 @@ void build_frame(Loader* loader) {
       add_wind(b, ld, geom, t, tree, vb, tod, cam_idx);
       add_category(tfrag3::TieCategory::NORMAL_ENVMAP, -1, etie_idx);
       add_category(tfrag3::TieCategory::NORMAL_ENVMAP_SECOND_DRAW, etie_idx);
+      if (s_jak3) {
+        // J3 (AI-assisted, jak3): the alpha/water tie buckets -- GL registers
+        // Tie3AnotherCategory TRANS / TRANS_ENVMAP on TIE/ETIE_L{n}_ALPHA and WATER /
+        // WATER_ENVMAP on TIE/ETIE_L{n}_WATER (init_bucket_renderers_jak3). Same
+        // base+shine split as the envmap normal category (get_second_draw_category),
+        // each pair at its own record slot (TieDk.h kJak3RangesPerPass).
+        add_category(tfrag3::TieCategory::TRANS, -1, -1, 2);                  // TIE_L{n}_ALPHA
+        add_category(tfrag3::TieCategory::TRANS_ENVMAP, -1, etie_idx, 3);     // ETIE_L{n}_ALPHA
+        add_category(tfrag3::TieCategory::TRANS_ENVMAP_SECOND_DRAW, etie_idx, -1, 3);
+        add_category(tfrag3::TieCategory::WATER, -1, -1, 4);                  // TIE_L{n}_WATER
+        add_category(tfrag3::TieCategory::WATER_ENVMAP, -1, etie_idx, 5);     // ETIE_L{n}_WATER
+        add_category(tfrag3::TieCategory::WATER_ENVMAP_SECOND_DRAW, etie_idx, -1, 5);
+      }
     }
   }
   ring->want = std::max(ring->want, ring->used);
   tod_evict_unused();
 }
 
-// ---- §7.2 phase 1 (AI-assisted): per-game bucket tables ----
+// ---- §7.2 phase 1 (AI-assisted) / J3 (jak3): per-game bucket tables ----
 
 void set_game(GameVersion v) {
-  s_jak2 = v == GameVersion::Jak2;
-  s_buckets = s_jak2 ? kJak2Buckets : kJak1Buckets;
-  s_pass_count = s_jak2 ? kJak2NumPasses : kNumPasses;
+  // J3: jak3 shares jak2's DMA shape (proto-vis packet, /128 envmap tint, no CALL head),
+  // so s_jak2_style covers both; s_jak3 adds the alpha/water tie buckets (6 record slots).
+  s_jak2_style = v == GameVersion::Jak2 || v == GameVersion::Jak3;
+  s_jak3 = v == GameVersion::Jak3;
+  if (s_jak3) {
+    s_buckets = kJak3Buckets;
+    s_pass_count = kJak3NumPasses;
+  } else if (v == GameVersion::Jak2) {
+    s_buckets = kJak2Buckets;
+    s_pass_count = kJak2NumPasses;
+  } else {
+    s_buckets = kJak1Buckets;
+    s_pass_count = kNumPasses;
+  }
+  s_ranges_per_pass = s_jak3 ? kJak3RangesPerPass : kRangesPerPass;
 }
 
 int pass_count() {
   return s_pass_count;
 }
 
+int ranges_per_pass() {
+  return s_ranges_per_pass;
+}
+
 int range_count() {
-  return s_pass_count * kRangesPerPass;
+  return s_pass_count * s_ranges_per_pass;
 }
 
 }  // namespace dktie

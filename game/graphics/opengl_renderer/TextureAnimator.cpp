@@ -12,8 +12,11 @@
 #include "game/graphics/opengl_renderer/slime_lut.h"
 #include "game/graphics/texture/TexturePool.h"
 
+#include <unordered_set>
+
 #if defined(__SWITCH__)
 #include "game/switch/imgui_stub.h"
+#include "game/switch/run_log.h"
 namespace dkgl {
 void set_int_attrib_draws(bool on);  // dkgl_state.h
 }
@@ -1241,6 +1244,33 @@ struct TextureAnimPcTransform {
   u32 pad1;
 };
 
+#if defined(__SWITCH__)
+// FIX 121 (AI-assisted): kill switches for the re-enabled jak2 animator publishing. The old
+// bans (SKULL_GEM-only fixed arrays, no DMA publish loop, no slime) existed because the
+// composites drew EMPTY under dkgl: their quads use GL_INT vertex attribs, which dkgl skips
+// outside the allow-list (dkgl_draw.cpp), so publishing replaced good static textures with
+// empty ones (gray plants/enemies, green smoke box, doors -- commit 429e36f7a). dk_texture_anim
+// (dk_renderer.cpp) now wraps the whole animator run in set_int_attrib_draws(true), the exact
+// mechanism the skull gem and clouds have used on hardware since f97fd4013, so the composites
+// draw for real and the publish loop fills the placeholder-forever textures the run log kept
+// naming ([sprtex] MISS ctywide-spriteticker-a/b, sign-krew-international, propaganda logo).
+// Both switches restore the pre-FIX-121 behaviour for A/B testing:
+//   sdmc:/switch/jak2/gk_dkgl_nodmatex.txt -> DMA publish loop stays off
+//   sdmc:/switch/jak2/gk_dkgl_noanim.txt   -> fixed arrays + slime stay off (skull gem only)
+namespace {
+bool tex_anim_flag_off(const char* path) {
+  FILE* f = std::fopen(path, "r");
+  if (f) {
+    std::fclose(f);
+  }
+  return f != nullptr;
+}
+const bool s_tex_anim_no_dma_publish =
+    tex_anim_flag_off("sdmc:/switch/jak2/gk_dkgl_nodmatex.txt");
+const bool s_tex_anim_no_arrays = tex_anim_flag_off("sdmc:/switch/jak2/gk_dkgl_noanim.txt");
+}  // namespace
+#endif
+
 /*!
  * Main function to run texture animations from DMA. Updates textures in the pool.
  */
@@ -1334,19 +1364,31 @@ void TextureAnimator::handle_texture_anim_data(DmaFollower& dma,
               auto anim =
                   anim_code_to_info(static_cast<PcTextureAnimCodesJak2>(vif0.immediate), *this);
               auto p = scoped_prof(anim.name.c_str());
+#ifdef __SWITCH__
+              // FIX 122 (AI-assisted): once-per-anim trace -- proves which fixed arrays
+              // GOAL actually requests on HW (the dispatch above only covers the codes
+              // with a C++ array; anything else never reaches the animator at all).
+              {
+                static std::unordered_set<std::string> s_logged;
+                if (s_logged.size() < 20 && s_logged.insert(anim.name).second) {
+                  switch_run_logf("[texanim] fixed %s", anim.name.c_str());
+                }
+              }
+#endif
 #if defined(__SWITCH__)
-              // jak2 (AI-assisted): under dkgl only the skull gem runs. The other arrays
-              // published empty outputs over the static textures (gray plants/enemies, green
-              // smoke box, doors), so they are not run at all: the static texture stays.
-              if (vif0.immediate != (u16)PcTextureAnimCodesJak2::SKULL_GEM) {
+              // FIX 121 (AI-assisted): the SKULL_GEM-only ban is lifted (gk_dkgl_noanim.txt
+              // restores it for A/B). The arrays never drew empty on their own -- dkgl was
+              // skipping their GL_INT composite quads (see the kill-switch note above
+              // handle_texture_anim_data); with the whole run allow-listed they draw for
+              // real, so their published outputs replace placeholder/black textures
+              // (stadium displays, bomb, metkor, shield, krew-holo, ...) with the right
+              // colours. The int-attrib allow-list itself moved up into dk_texture_anim.
+              if (m_version == GameVersion::Jak2 && s_tex_anim_no_arrays &&
+                  vif0.immediate != (u16)PcTextureAnimCodesJak2::SKULL_GEM) {
                 break;
               }
-              dkgl::set_int_attrib_draws(true);
 #endif
               run_fixed_animation_array(anim.anim_array_idx, tf, texture_pool);
-#if defined(__SWITCH__)
-              dkgl::set_int_attrib_draws(false);
-#endif
               break;
             }
             case PcTextureAnimCodesJak2::CLOUDS_AND_FOG:
@@ -1484,9 +1526,16 @@ void TextureAnimator::handle_texture_anim_data(DmaFollower& dma,
   // we need to make sure that all final textures end up on the GPU, if desired. (todo: move this to
   // happen somewhere else)?
 #if defined(__SWITCH__)
-  // jak2 (AI-assisted): the DMA-driven composites can't draw under dkgl, so publishing them
-  // would replace the static textures with empty ones. Keep the static textures.
-  const bool publish_dma_textures = m_version != GameVersion::Jak2;
+  // FIX 121 (AI-assisted): the jak2 DMA publish ban is lifted (gk_dkgl_nodmatex.txt restores
+  // it). The ban existed because the composites drew empty under dkgl -- their quads use
+  // GL_INT vertex attribs that dkgl skipped outside the allow-list, so publishing would have
+  // replaced static textures with empty ones. dk_texture_anim now wraps the whole animator
+  // run in set_int_attrib_draws(true) (the skull gem has run that way on HW since f97fd4013),
+  // so the publish loop puts real pixels where the black placeholder textures were: the
+  // ctywide ticker tapes, sign-krew-international, the baron propaganda logo, and the
+  // DMA-driven damage/animated surfaces. Sky tbps (0/128) stay published in both modes --
+  // they are generated here and reach the pool only through this loop.
+  const bool publish_dma_textures = m_version != GameVersion::Jak2 || !s_tex_anim_no_dma_publish;
 #else
   const bool publish_dma_textures = true;
 #endif
@@ -1511,6 +1560,17 @@ void TextureAnimator::handle_texture_anim_data(DmaFollower& dma,
       // if it was skipped by the above step, this is just some temporary texture we don't need
       // (hopefully)
       // (TODO: could flag these somehow?)
+#ifdef __SWITCH__
+      // FIX 122 (AI-assisted): pages that stay CPU-side (the CLUT16 conversion HACK in
+      // force_to_gpu, un-forced PSMT8/4 uploads) are invisible in the SD log -- log each
+      // once so a MISSing sprite page can be matched against them.
+      {
+        static std::unordered_set<u32> s_logged;
+        if (s_logged.size() < 60 && s_logged.insert(tbp).second) {
+          switch_run_logf("[texanim] nongpu tbp=%u kind=%d", tbp, (int)entry.kind);
+        }
+      }
+#endif
       continue;
     }
 
@@ -1557,6 +1617,16 @@ void TextureAnimator::handle_texture_anim_data(DmaFollower& dma,
       texture_pool->move_existing_to_vram(entry.pool_gpu_tex, tbp);
       dprintf("no change %d\n", tbp);
     }
+#if defined(__SWITCH__)
+    // FIX 121 diagnostic: name each published DMA texture once in gk_run_log.txt, so a
+    // hardware test can confirm the tickers/signs actually landed in the pool (the [sprtex]
+    // MISS lines for the same tbps should stop). Capped at 60 one-time lines; this runs on
+    // the render thread, where every other switch_run_logf already lives.
+    static std::unordered_set<u32> s_pub_logged;
+    if (s_pub_logged.size() < 60 && s_pub_logged.insert(tbp).second) {
+      switch_run_logf("[texanim] publish tbp=%u %ux%d", tbp, entry.tex_width, entry.tex_height);
+    }
+#endif
   }
 
   glDepthMask(GL_TRUE);
@@ -1754,13 +1824,10 @@ void TextureAnimator::handle_clouds_and_fog(const DmaTransfer& tf,
     return;
   }
 #endif
-#if defined(__SWITCH__)
-  dkgl::set_int_attrib_draws(true);  // AI-assisted: the cloud composites use int attribs too
-#endif
+  // FIX 121: the local set_int_attrib_draws(true/false) wrap is gone -- dk_texture_anim
+  // now allow-lists int-attrib draws for the whole animator run (the clouds still draw the
+  // same way; nothing else in this capture context uses GL_INT attribs).
   auto tex = run_clouds(input, hires);
-#if defined(__SWITCH__)
-  dkgl::set_int_attrib_draws(false);
-#endif
 
   if (gpu_tex) {
     texture_pool->move_existing_to_vram(gpu_tex, input.cloud_dest);
@@ -1779,8 +1846,11 @@ void TextureAnimator::handle_clouds_and_fog(const DmaTransfer& tf,
 
 void TextureAnimator::handle_slime(const DmaTransfer& tf, TexturePool* texture_pool) {
 #if defined(__SWITCH__)
-  if (m_version == GameVersion::Jak2) {
-    return;  // jak2 dkgl (AI-assisted): keep the static textures, see SKULL_GEM above.
+  // FIX 121: slime rides the same re-enable as the fixed arrays (same ban reason: its
+  // composites drew empty because dkgl skipped the GL_INT quads). gk_dkgl_noanim.txt turns
+  // it back off for A/B.
+  if (m_version == GameVersion::Jak2 && s_tex_anim_no_arrays) {
+    return;
   }
 #endif
   ASSERT(tf.size_bytes >= sizeof(SlimeInput));
@@ -1859,6 +1929,18 @@ void TextureAnimator::handle_upload_clut_16_16(const DmaTransfer& tf, const u8* 
   vram.tex_width = upload->width;
   vram.tex_height = upload->height;
   memcpy(vram.data.data(), ee_mem + upload->data, vram.data.size());
+#ifdef __SWITCH__
+  // FIX 122 (AI-assisted): once-per-cbp trace of the generic DMA path. The 2026-11-18
+  // HW log shows the publish loop only ever reaching the two sky tbps (0/128) while
+  // gungame-sprite/gen-* / meta-* and hiphog neon pages MISS in the pool forever --
+  // these logs show which stage (upload/clut/erase/draw) each page actually reaches.
+  {
+    static std::unordered_set<u32> s_logged;
+    if (s_logged.size() < 60 && s_logged.insert(upload->dest).second) {
+      switch_run_logf("[texanim] clut cbp=%u", upload->dest);
+    }
+  }
+#endif
   if (m_tex_looking_for_clut) {
     m_tex_looking_for_clut->cbp = upload->dest;
     m_tex_looking_for_clut = nullptr;
@@ -1918,6 +2000,16 @@ void TextureAnimator::handle_generic_upload(const DmaTransfer& tf, const u8* ee_
       lg::print("Unhandled format: {}\n", upload->format);
       ASSERT_NOT_REACHED();
   }
+#ifdef __SWITCH__
+  // FIX 122 (AI-assisted): see the note in handle_upload_clut_16_16 above.
+  {
+    static std::unordered_set<u32> s_logged;
+    if (s_logged.size() < 60 && s_logged.insert(upload->dest).second) {
+      switch_run_logf("[texanim] upload tbp=%u fmt=%d f2g=%d", upload->dest, upload->format,
+                      (int)upload->force_to_gpu);
+    }
+  }
+#endif
 }
 
 /*!
@@ -1954,6 +2046,16 @@ void TextureAnimator::handle_erase_dest(DmaFollower& dma) {
     GsFrame frame(ad_data[2 * 2]);
     int dest_texture_address = 32 * frame.fbp();
     dprintf(" dest: 0x%x\n", dest_texture_address);
+#ifdef __SWITCH__
+    // FIX 122 (AI-assisted): see the note in handle_upload_clut_16_16 above.
+    {
+      static std::unordered_set<u32> s_logged;
+      if (s_logged.size() < 60 && s_logged.insert((u32)dest_texture_address).second) {
+        switch_run_logf("[texanim] erase tbp=%u %dx%d", (u32)dest_texture_address, tex_width,
+                        tex_height);
+      }
+    }
+#endif
 
     // 3 (test-1 (-> anim test))
     ASSERT(ad_data[2 * 3 + 1] == (int)GsRegisterAddress::TEST_1);
@@ -2083,6 +2185,15 @@ void TextureAnimator::handle_draw(DmaFollower& dma, TexturePool& texture_pool) {
     // texture
     auto& dest_te = m_textures.at(m_current_dest_tbp);
     ASSERT(dest_te.kind == VramEntry::Kind::GPU);
+#ifdef __SWITCH__
+    // FIX 122 (AI-assisted): see the note in handle_upload_clut_16_16 above.
+    {
+      static std::unordered_set<int> s_logged;
+      if (s_logged.size() < 60 && s_logged.insert(m_current_dest_tbp).second) {
+        switch_run_logf("[texanim] draw dst=%d", m_current_dest_tbp);
+      }
+    }
+#endif
 
     // set up context to draw to this one
     FramebufferTexturePairContext ctxt(*dest_te.tex);

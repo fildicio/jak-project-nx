@@ -616,4 +616,15 @@ u64 buffer_epoch() {
   return g_buffer_epoch;
 }
 
+// ---- FIX 124 (AI-assisted): pool draw-stamp seam (see dkgl_state.h) ----------
+PoolDrawStampFn g_pool_draw_stamp = nullptr;
+void set_pool_draw_stamp_hook(PoolDrawStampFn fn) {
+  g_pool_draw_stamp = fn;
+}
+void note_pool_draw(u64 gpu_id) {
+  if (g_pool_draw_stamp) {
+    g_pool_draw_stamp(gpu_id);
+  }
+}
+
 }  // namespace dkgl

@@ -138,3 +138,5 @@ build-mipq/
 # local AI reference copy (deko3d 0.5.0 headers/examples from devkita64 image)
 /docs/deko3d-ref/
 hw-logs/
+# playwright MCP session artifacts (screenshots/console logs)
+/.playwright-mcp/

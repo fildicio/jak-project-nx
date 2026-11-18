@@ -263,6 +263,12 @@
 
 (defmethod update-video-hacks ((obj pc-settings-jak1))
   "update the graphics hacks used for sprites and other things. ugh."
+  ;; Switch port (AI-assisted): the console output is always 16:9 (720p handheld /
+  ;; 1080p docked). jak1's camera reads the aspect-ratio game setting directly
+  ;; (cam-update: *setting-control* current) -- force current and default to 16:9.
+  (when (= (pc-get-os) 'switch)
+    (set! (-> *setting-control* current aspect-ratio) 'aspect16x9)
+    (set! (-> *setting-control* default aspect-ratio) 'aspect16x9))
   (set! (-> (get-video-params) relative-x-scale) (-> obj aspect-ratio-reciprocal))
   (set! (-> (get-video-params) relative-x-scale-reciprical) (-> obj aspect-ratio-scale))
   (set! (-> *font-default-matrix* vector 0 x) (-> (get-video-params) relative-x-scale))

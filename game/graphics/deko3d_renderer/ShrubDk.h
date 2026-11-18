@@ -29,7 +29,26 @@ inline constexpr int kJak2Buckets[6] = {
     jak2_lvl(jak2::BucketId::SHRUB_L0_SHRUB, jak2::BucketId::SHRUB_L1_SHRUB, 5),
 };
 inline constexpr int kJak2NumPasses = 6;
-inline constexpr int kMaxPasses = kJak2NumPasses;  // capture arrays sized for either game
+// J3 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md §2): jak3 shrub
+// buckets (shrub-l{n}-shrub), 10 levels. Same DMA shape as jak2 (proto-vis packet after
+// the pc data, GL Shrub::render).
+constexpr int jak3_lvl(jak3::BucketId a, jak3::BucketId b, int i) {
+  return (int)a + ((int)b - (int)a) * i;
+}
+inline constexpr int kJak3Buckets[10] = {
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 0),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 1),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 2),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 3),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 4),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 5),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 6),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 7),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 8),
+    jak3_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, 9),
+};
+inline constexpr int kJak3NumPasses = 10;
+inline constexpr int kMaxPasses = kJak3NumPasses;  // capture arrays sized for any game (10)
 
 // T70: read both shrub buckets (same reads as GL Shrub::render, jak1: no proto-vis mask).
 void capture_chain(const void* data, uint32_t start_offset);
@@ -44,10 +63,11 @@ const dktf::FrameDraws& frame_draws();
 // T72: record frame_draws() with the SHRUB shaders (dk_tfrag_record.cpp, Switch only).
 void record_world(int fb_w, int fb_h);
 
-// ---- §7.2 phase 1 (AI-assisted): per-game bucket tables ----
-// Default = jak1; dk_renderer calls set_game at boot. On jak2 the bucket also carries a
-// proto-vis packet after the pc data (GL Shrub::render); phase 1 skips it = GL with an
-// all-true mask (applying it rides the phase-2/3 tie-category/proto-vis work).
+// ---- §7.2 phase 1 (jak2) / J3 (jak3): per-game bucket tables ----
+// Default = jak1; dk_renderer calls set_game at boot. On the gen-2 games (jak2, jak3) the
+// bucket also carries a proto-vis packet after the pc data (GL Shrub::render); phase 1
+// skips it = GL with an all-true mask (applying it rides the phase-2/3 tie-category/
+// proto-vis work).
 void set_game(GameVersion v);
 // Capture passes of the active game (jak1: 2, jak2: 6).
 int pass_count();

@@ -27,6 +27,7 @@ constexpr PerGameVersion<int> game_height(448, 416, 416, 416);
 #include <fcntl.h>
 #include <unistd.h>
 #include "game/switch/boot_log.h"
+#include "game/switch/run_log.h"
 
 static void boot_log_dr(const char* msg) {
   switch_boot_log(msg);
@@ -428,6 +429,35 @@ void DirectRenderer::flush_pending(SharedRenderState* render_state, ScopedProfil
   glUniform4f(gl_uniform_loc(current_shader, "game_sizes"), 512.0f,
               game_height[render_state->version], viewport_size[2], viewport_size[3]);
 
+#if defined(__SWITCH__)
+  // AI-assisted (DKGL_TODO row R): dump the actual inputs of the fmt44 (MT4HH) glyph
+  // batch -- the damage-number / health-bar draws behind the punch white-box flash.
+  // Every binding-chain layer already checks out in the log (gl id constant through the
+  // flash window), so the failure has to live in per-draw transient state: TEXA ta0, the
+  // tcc/decal vertex attribs, the blend mults, the alpha test, or the vertex payload
+  // itself. Rate-limited like the other probes: first 240 batches, then 1/600.
+  if (m_name == "debug-no-zbuf1" && m_buffered_tex_state[0].using_mt4hh) {
+    static u32 s_logged = 0;
+    static u32 s_seen = 0;
+    s_seen++;
+    if (s_logged < 240 || (s_seen % 600) == 0) {
+      s_logged++;
+      const Vertex& v0 = m_prim_buffer.vertices[0];
+      switch_run_logf(
+          "[nozb1draw] tbp=%u v=%d ta0=%u cm=%.2f am=%.2f atest=%d/%d aref=%u dd=%d "
+          "v0=(%.1f,%.1f,%.1f) rgba=%02x%02x%02x%02x st=(%.1f,%.1f) q=%.1f tcc=%d dec=%d "
+          "uv=%d fog=%d",
+          m_buffered_tex_state[0].texture_base_ptr, m_prim_buffer.vert_count,
+          m_prim_gl_state.ta0, m_ogl.color_mult, m_ogl.alpha_mult,
+          (int)m_test_state.alpha_test_enable, (int)m_test_state.alpha_test,
+          (unsigned)m_test_state.aref, (int)m_test_state_needs_double_draw, v0.xyzf[0],
+          v0.xyzf[1], v0.xyzf[2], v0.rgba[0], v0.rgba[1], v0.rgba[2], v0.rgba[3], v0.stq[0],
+          v0.stq[1], v0.stq[2], (int)v0.tcc, (int)v0.decal, (int)v0.use_uv,
+          (int)v0.fog_enable);
+    }
+  }
+#endif
+
   int draw_count = 0;
   int num_tris = 0;
 
@@ -628,6 +658,24 @@ void DirectRenderer::update_gl_texture(SharedRenderState* render_state, int unit
     tex = render_state->texture_pool->get_placeholder_texture();
   }
   ASSERT(tex);
+#if defined(__SWITCH__)
+  // AI-assisted (DKGL_TODO row R): jak2 damage numbers / health bars draw in debug-no-zbuf1.
+  // Log which texture each page resolves to there, only when the pairing changes.
+  if (m_name == "debug-no-zbuf1") {
+    static u32 s_last_tbp = UINT32_MAX;
+    static u64 s_last_tex = UINT64_MAX;
+    static u32 s_logged = 0;
+    if ((state.texture_base_ptr != s_last_tbp || *tex != s_last_tex) && s_logged < 400) {
+      s_last_tbp = state.texture_base_ptr;
+      s_last_tex = *tex;
+      s_logged++;
+      switch_run_logf(
+          "[nozb1tex] tbp=%u gl=%llu %s", state.texture_base_ptr, (unsigned long long)*tex,
+          render_state->texture_pool->get_debug_texture_name_from_tbp(state.texture_base_ptr)
+              .c_str());
+    }
+  }
+#endif
 
   glActiveTexture(GL_TEXTURE20 + unit);
   glBindTexture(GL_TEXTURE_2D, *tex);

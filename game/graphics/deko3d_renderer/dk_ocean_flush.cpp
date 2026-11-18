@@ -42,7 +42,7 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 namespace dkocean {
 namespace {
 
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 constexpr uint32_t kUboSize = 0x100;   // one OceanCommonParams per bucket value
 constexpr uint32_t kOceanTexSize = 128;
 constexpr uint32_t kOceanTexMips = 8;  // FIX 112: GL OceanTexture::NUM_MIPS

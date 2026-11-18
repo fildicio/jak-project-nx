@@ -88,7 +88,11 @@ static inline int cubeb_get_min_latency(cubeb* /*context*/,
                                         cubeb_stream_params* /*params*/,
                                         uint32_t* latency_frames) {
   // SDL picks the real buffer size when the device opens; this is only a hint upstream.
-  *latency_frames = 1024;
+  // FIX 121: 2048 frames so cubeb_stream_init asks SDL for ~43 ms of device buffer (see the
+  // want.samples comment there). The old 1024 left only ~21 ms of tolerance for a late
+  // audout callback, and every underrun permanently cost the sound clock a buffer it never
+  // got back (the measured audio-vs-frame drift).
+  *latency_frames = 2048;
   return CUBEB_OK;
 }
 
@@ -116,7 +120,15 @@ static inline int cubeb_stream_init(cubeb* /*context*/,
   want.freq = static_cast<int>(output_params->rate);
   want.format = AUDIO_S16LSB;
   want.channels = static_cast<Uint8>(output_params->channels);
-  want.samples = static_cast<Uint16>(latency_frames ? latency_frames : 1024);
+  // FIX 121: 2048 frames (~43 ms) instead of 1024 (~21 ms). The audout thread is not pinned
+  // (FIX 70b) and shares cores with the loader/EE, and the sound clock (mTick) is counted
+  // inside this callback: every late callback is an underrun the clock never gets back, which
+  // showed up as up to +0.7 s of audio-vs-frame drift per 10 s of busy gameplay (measured
+  // between the [aud] 10s log lines). Doubling the device buffer doubles the tolerance for
+  // one late callback instead of a permanent tick loss. Gameplay sound events are scheduled
+  // on the audio tick itself, so the extra ~21 ms of constant latency is self-consistent
+  // (the PS2's own audio DMA path ran at a comparable delay).
+  want.samples = static_cast<Uint16>(latency_frames ? latency_frames : 2048);
   want.callback = sdl_shim_audio_callback;
   want.userdata = s;
 

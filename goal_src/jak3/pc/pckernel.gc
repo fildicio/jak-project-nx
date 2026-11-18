@@ -359,6 +359,13 @@
 (defmethod update-video-hacks ((obj pc-settings-jak3))
   "update the graphics hacks used for the progress menu. ugh."
 
+  ;; Switch port (AI-assisted): the console output is always 16:9 (720p handheld /
+  ;; 1080p docked). A jak3 save created on PS2/PC can carry a 4:3 aspect-ratio game
+  ;; setting, and cam-update / main / blit-displays read user-current directly --
+  ;; force both the current and default game setting every frame.
+  (when (= (pc-get-os) 'switch)
+    (set! (-> *setting-control* user-current aspect-ratio) 'aspect16x9)
+    (set! (-> *setting-control* user-default aspect-ratio) 'aspect16x9))
   (set! (-> (get-video-params) relative-x-scale) (-> obj aspect-ratio-reciprocal))
   (set! (-> (get-video-params) relative-x-scale-reciprical) (-> obj aspect-ratio-scale))
   )

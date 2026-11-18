@@ -10,6 +10,42 @@
 using namespace maxwell;
 using namespace dk::detail;
 
+// jak-switch patch 4 / J7 (AI-assisted): gpfifo load instrumentation. The 0x800-entry
+// kernel gpfifo ring is the scarce resource behind the 0xd5c (nv InsufficientMemory)
+// kickoff failures on heavy jak3 frames; this prints one compact line per second with
+// the number of entries appended (host-side), explicit kickoffs, and the retry-drain
+// events that precede a 0xd5c, so a single HW run shows entries/frame and whether the
+// per-frame-fence fix (dkgl record_frame_fence) actually drained the ring.
+namespace {
+u64 s_j7Entries = 0;       // gpfifo entries appended (successful AppendEntry calls)
+u64 s_j7Kickoffs = 0;      // explicit nvGpuChannelKickoff calls from flush()
+u64 s_j7AppendFails = 0;   // entries that needed at least one drain-retry
+u64 s_j7KickoffFails = 0;  // kickoffs that needed at least one drain-retry
+u32 s_j7PeakPending = 0;   // max m_gpuChannel.num_entries seen in the window
+u64 s_j7WindowStart = 0;   // svcGetSystemTick of the window start, 0 = uninitialised
+
+void j7NoteLoad(u32 pending) {
+  if (pending > s_j7PeakPending) {
+    s_j7PeakPending = pending;
+  }
+  u64 now = svcGetSystemTick();
+  if (!s_j7WindowStart) {
+    s_j7WindowStart = now;
+    return;
+  }
+  // system tick = 19.2 MHz -> ns = ticks * 625 / 12
+  if ((now - s_j7WindowStart) * 625 / 12 >= 1000000000ull) {
+    printf("[deko3d] gpfifo 1s: entries=%llu kickoffs=%llu pending-max=%u append-retries=%llu kickoff-retries=%llu\n",
+           (unsigned long long)s_j7Entries, (unsigned long long)s_j7Kickoffs,
+           s_j7PeakPending, (unsigned long long)s_j7AppendFails,
+           (unsigned long long)s_j7KickoffFails);
+    s_j7Entries = s_j7Kickoffs = s_j7AppendFails = s_j7KickoffFails = 0;
+    s_j7PeakPending = 0;
+    s_j7WindowStart = now;
+  }
+}
+}  // namespace
+
 DkResult Queue::initialize()
 {
 	DkResult res;
@@ -175,12 +211,39 @@ void Queue::appendGpfifoEntries(CtrlCmdGpfifoEntry const* entries, uint32_t numE
 #endif
 		u32 flags = GPFIFO_ENTRY_NOT_MAIN | ((ent.flags & CtrlCmdGpfifoEntry::NoPrefetch) ? GPFIFO_ENTRY_NO_PREFETCH : 0);
 		u32 threshold = (ent.flags & CtrlCmdGpfifoEntry::AutoKick) ? 8 : 0;
-		if (R_FAILED(nvGpuChannelAppendEntry(&m_gpuChannel, ent.iova, ent.numCmds, flags, threshold)))
+		Result res = nvGpuChannelAppendEntry(&m_gpuChannel, ent.iova, ent.numCmds, flags, threshold);
+		if (R_FAILED(res))
+			++ s_j7AppendFails;
+		// jak-switch patch 3: jak3's first world frame (level load + intro + all passes
+		// starting at once) records so many command chunks that the 0x800-entry host
+		// gpfifo fills mid-frame; libnx then auto-kicks off and that submit can fail
+		// while nvdrv still holds unconsumed entries. Stock deko3d aborts the whole
+		// process here (0x367 = 359:1 DkResult_Fail, seen on jak3 first HW boot). Instead:
+		// report the real nvdrv result, give the GPU up to ~3 s to retire the oldest
+		// in-flight fence (which drains the host gpfifo), and retry. A backed-up GPU
+		// now degrades to a hitch; a genuinely dead channel still aborts, but with the
+		// real error code printed.
+		for (unsigned attempt = 0; R_FAILED(res) && attempt < 12; attempt ++)
 		{
+			printf("[deko3d] gpfifo append failed res=0x%x pending=%u (try %u/12) - draining GPU\n",
+				res, m_gpuChannel.num_entries, attempt + 1);
+			uint32_t fenceId;
+			if (m_fenceRing.getFirstInFlight(fenceId))
+				m_fences[fenceId].wait(250000); // 250 ms, in microseconds
+			else
+				svcSleepThread(250000000ull); // nothing in flight: plain backoff
+			res = nvGpuChannelAppendEntry(&m_gpuChannel, ent.iova, ent.numCmds, flags, threshold);
+		}
+		if (R_FAILED(res))
+		{
+			printf("[deko3d] gpfifo append failed for good res=0x%x pending=%u\n",
+				res, m_gpuChannel.num_entries);
 			if (!checkError())
 				DK_ERROR(DkResult_Fail, "gpfifo entry append failed, but no error was reported");
 			return;
 		}
+		++ s_j7Entries;  // J7 instrumentation
+		j7NoteLoad(m_gpuChannel.num_entries);
 	}
 }
 
@@ -342,7 +405,26 @@ void Queue::flush()
 		flushCmdBuf();
 		// TODO:
 		// - Do the ZBC shit
-		if (R_FAILED(nvGpuChannelKickoff(&m_gpuChannel)))
+		// jak-switch patch 3 (second site): kickoff can fail while nvdrv still holds
+		// unconsumed gpfifo entries (heavy frame + GPU lag). Drain and retry bounded
+		// instead of aborting; keep the original error for genuinely dead channels.
+		Result kres = nvGpuChannelKickoff(&m_gpuChannel);
+		++ s_j7Kickoffs;  // J7 instrumentation
+		if (R_FAILED(kres))
+			++ s_j7KickoffFails;
+		j7NoteLoad(m_gpuChannel.num_entries);
+		for (unsigned attempt = 0; R_FAILED(kres) && attempt < 12; attempt ++)
+		{
+			printf("[deko3d] kickoff failed res=0x%x pending=%u (try %u/12) - draining GPU\n",
+				kres, m_gpuChannel.num_entries, attempt + 1);
+			uint32_t fenceId;
+			if (m_fenceRing.getFirstInFlight(fenceId))
+				m_fences[fenceId].wait(250000); // 250 ms, in microseconds
+			else
+				svcSleepThread(250000000ull);
+			kres = nvGpuChannelKickoff(&m_gpuChannel);
+		}
+		if (R_FAILED(kres))
 		{
 			if (!checkError())
 				DK_ERROR(DkResult_Fail, "gpu channel kickoff failed, but no error was reported");

@@ -40,7 +40,7 @@ namespace dktexgpu {
 
 // Size the P2.3 texture GPU half:
 //   - alloc the 48 MB image memblock (DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
-//   - init the dktex::TextureStore at capacity = kMaxTexImages (2048 slots);
+//   - init the dktex::TextureStore at capacity = kMaxTexImages (4096 slots, FIX 119);
 //   - reset the bump cursor and the per-tex DkImage handle map.
 // False when the memblock does not allocate or the store fails to init (the
 // memblock is destroyed if the store init fails, and active() stays false).

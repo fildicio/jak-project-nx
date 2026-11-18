@@ -5,11 +5,20 @@
 // half only. Plain C++ header (no deko3d includes), like TFragmentDk.h.
 #include <cstdint>
 
+enum class GameVersion : int;  // common/versions/versions.h (J3 set_game pick)
+
 struct TfragPcPortData;  // background_common.h (pointer-only use here, like TieDk.h)
 
 class Loader;
 
 namespace dkhfrag {
+
+// J3 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md §2): per-game chain
+// shape. jak1 chains open with a CALL to the default-regs chain (bucket table at
+// offset + 16); jak3 chains, like jak2's, start at the bucket table itself (GL
+// dispatch_buckets_jak3 "buckets_base = dma.current_tag_offset()"). The HFRAG bucket id
+// is 8 in both games' enums. Default = jak1 (safe before set_game).
+void set_game(GameVersion v);
 
 // Render thread, BEFORE the chain is acknowledged: read the HFRAG bucket's
 // TfragPcPortData packets (level name + camera). No GPU access.

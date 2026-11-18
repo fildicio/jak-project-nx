@@ -36,6 +36,20 @@
 void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 #endif
 
+#if defined(__SWITCH__)
+namespace {
+// FIX 123 (AI-assisted): trace the four still-black tbp pages end to end.
+// 998 hiphog-sprite, 2405 gungame-sprite, 1021 ctysluma-sprite, 1325 ctyport-sprite
+// (combo ids from out/jak2/fr3; all verified load_to_pool=1 there). [pool] link =
+// handle_upload_now (runtime tpage id + runtime tex index), [pool] give = the
+// loader filling that PcTextureId, [pool] placeholder-new = a link before the
+// give, [pool] unload = the entry going placeholder again.
+bool tex_probe_page(u32 page) {
+  return page == 998 || page == 2405 || page == 1021 || page == 1325;
+}
+}  // namespace
+#endif
+
 namespace {
 const char empty_string[] = "";
 const char* goal_string(u32 ptr, const u8* memory_base) {
@@ -101,6 +115,12 @@ u64 upload_to_gpu(const u8* data, u16 w, u16 h) {
 }
 
 GpuTexture* TexturePool::give_texture(const TextureInput& in) {
+#if defined(__SWITCH__)
+  if (tex_probe_page(in.id.page)) {
+    switch_run_logf("[pool] give %u/%u %ux%u common=%d %s/%s", in.id.page, in.id.tex, in.w, in.h,
+                    (int)in.common, in.debug_page_name.c_str(), in.debug_name.c_str());
+  }
+#endif
 #if defined(__SWITCH__)
   // T105 (AI-assisted): dkgl seam. A TextureInput can carry a dkgl-created texture id
   // (kTexIdBase | n, e.g. the ocean's FramebufferTexturePair result). Resolve it to the
@@ -218,6 +238,13 @@ void TexturePool::refresh_links(GpuTexture& texture) {
 }
 
 void TexturePool::unload_texture(PcTextureId tex_id, u64 gpu_id) {
+#if defined(__SWITCH__)
+  if (tex_probe_page(tex_id.page)) {
+    // FIX 123: unloading flips the entry back to placeholder; a tbp still drawn
+    // after this is black forever (no give follows a same-level unload).
+    switch_run_logf("[pool] unload %u/%u", tex_id.page, tex_id.tex);
+  }
+#endif
   auto* tex = m_loaded_textures.lookup_existing(tex_id);
   ASSERT(tex);
   // if (tex->is_common) {
@@ -303,6 +330,14 @@ void TexturePool::handle_upload_now(const u8* tpage,
       for (int mip_idx = 0; mip_idx < tex.num_mips; mip_idx++) {
         if (has_segment[tex.segment_of_mip(mip_idx)]) {
           PcTextureId current_id(texture_page.id, tex_idx);
+#if defined(__SWITCH__)
+          if (tex_probe_page(current_id.page)) {
+            // FIX 123: the runtime half of the pair. If page/tex here differ from
+            // the fr3 combo ids, the later give can never fill this entry.
+            switch_run_logf("[pool] link tbp=%u -> pc %u/%u", tex.dest[mip_idx], current_id.page,
+                            current_id.tex);
+          }
+#endif
           if (!m_id_to_name.lookup_existing(current_id)) {
             auto name = std::string(goal_string(texture_page.name_ptr, memory_base)) +
                         goal_string(tex.name_ptr, memory_base);
@@ -342,6 +377,16 @@ void TexturePool::relocate(u32 destination, u32 source, u32 format) {
     m_mt4hh_textures.back().ref.source = src;
     m_mt4hh_textures.back().ref.gpu_texture = src->gpu_textures.at(0).gl;
     src->mt4hh_slots.push_back(destination);
+#if defined(__SWITCH__)
+    // AI-assisted (DKGL_TODO row R): fmt44 font-pair registration. lookup_mt4hh returns
+    // the HL source's gl id and the glyph shape comes from that texture's alpha (HH);
+    // log which id backs the slot so the [fonttex] upload census and the [nozb1draw]
+    // draw dump can be correlated against it. relocate() only runs at page setup, so
+    // log every occurrence.
+    switch_run_logf("[mt4hh] dst=%u src=%u/%u gl=%llu", destination,
+                    (unsigned)src->tex_id.page, (unsigned)src->tex_id.tex,
+                    (unsigned long long)src->gpu_textures.at(0).gl);
+#endif
   } else {
     move_existing_to_vram(src, destination);
   }
@@ -354,6 +399,14 @@ GpuTexture* TexturePool::get_gpu_texture_for_slot(PcTextureId id, u32 slot) {
     placeholder.tex_id = id;
     placeholder.is_placeholder = true;
     placeholder.slots.push_back(slot);
+
+#if defined(__SWITCH__)
+    if (tex_probe_page(id.page)) {
+      // FIX 123: a link arrived before the loader gave this PcTextureId. It is
+      // fine as long as a give follows before the page is drawn.
+      switch_run_logf("[pool] placeholder-new %u/%u (slot=%u)", id.page, id.tex, slot);
+    }
+#endif
 
     // auto r = m_loaded_textures.insert({name, placeholder});
     m_textures[slot].gpu_texture = m_placeholder_texture_id;
@@ -371,11 +424,122 @@ std::optional<u64> TexturePool::lookup_mt4hh(u32 location) {
   for (auto& t : m_mt4hh_textures) {
     if (t.slot == location) {
       if (t.ref.source) {
+        t.ref.source->last_draw_frame = m_draw_frame;  // FIX 124: draw stamp
         return t.ref.gpu_texture;
       }
     }
   }
   return {};
+}
+
+void TexturePool::note_draw_id(u64 gpu_id) {
+  // FIX 124 (AI-assisted): stamp an id the dkgl bind seam drew with. These ids
+  // never go through lookup(tbp) -- merc/Generic2 bind lev->textures ids
+  // directly -- so without this the pool could not tell they were still in
+  // use. Benign u64 store from the render thread, same as the slot stamp in
+  // lookup().
+  if (gpu_id < m_id_draw_stamps.size()) {
+    m_id_draw_stamps[gpu_id] = m_draw_frame;
+  }
+}
+
+bool TexturePool::unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id) {
+  // FIX 124 (AI-assisted): see the header block. Caller holds the pool mutex
+  // (Loader::unload_level_gpu_objects) and runs on the render thread -- the
+  // same thread that stamps draws -- so the age checks are race-free.
+  if (m_defer_frames == 0) {
+    unload_texture(tex_id, gpu_id);
+    return true;
+  }
+  auto* tex = m_loaded_textures.lookup_existing(tex_id);
+  if (!tex || tex->is_placeholder) {
+    // No live pool copy to protect (the old path's ASSERTs would have fired;
+    // practically a double unload or a never-given id). The pool does not
+    // reference this id, so telling the caller to delete it is right.
+    return true;
+  }
+  u64 age = m_draw_frame - tex->last_draw_frame;
+  if (gpu_id < m_id_draw_stamps.size()) {
+    const u64 id_age = m_draw_frame - m_id_draw_stamps[gpu_id];
+    if (id_age < age) {
+      age = id_age;
+    }
+  }
+  if (age > m_defer_frames) {
+    unload_texture(tex_id, gpu_id);
+    return true;
+  }
+  // Still drawn: keep the GPU id and retry once the page goes idle. A page can
+  // appear twice in a level's list (FIX 103 dedup) and two levels can unload
+  // the same shared page in one frame -- queue it exactly once.
+  for (const auto& d : m_deferred_unloads) {
+    if (d.gpu_id == gpu_id) {
+      return false;
+    }
+  }
+  m_deferred_unloads.push_back({tex_id, gpu_id});
+#if defined(__SWITCH__)
+  {
+    static u32 s_fix124_logged = 0;
+    if (s_fix124_logged < 40 || (s_fix124_logged % 600) == 0) {
+      switch_run_logf("[pool] FIX124 defer unload %u/%u (drawn %llu frames ago, %zu queued)",
+                      tex_id.page, tex_id.tex, (unsigned long long)age, m_deferred_unloads.size());
+    }
+    s_fix124_logged++;
+  }
+#endif
+  return false;
+}
+
+size_t TexturePool::retry_deferred_unloads(std::vector<u64>& out_released) {
+  // FIX 124 (AI-assisted): finish the deferrals whose pages have gone idle.
+  // Called once per frame by Loader::update with the pool mutex held. Freed
+  // ids go to out_released (the Loader queues them for the usual paced
+  // delete); returns the number of deferrals still outstanding.
+  for (size_t i = 0; i < m_deferred_unloads.size();) {
+    const DeferredUnload d = m_deferred_unloads[i];
+    auto* tex = m_loaded_textures.lookup_existing(d.tex_id);
+    bool release = false;
+    if (!tex || tex->is_placeholder) {
+      // Entry gone or already placeholder: no pool reference to the id is
+      // left (an earlier retry did the teardown) -- safe to delete.
+      release = true;
+    } else {
+      u64 age = m_draw_frame - tex->last_draw_frame;
+      if (d.gpu_id < m_id_draw_stamps.size()) {
+        const u64 id_age = m_draw_frame - m_id_draw_stamps[d.gpu_id];
+        if (id_age < age) {
+          age = id_age;
+        }
+      }
+      if (age > m_defer_frames) {
+        // The same teardown unload_texture does, from the retry path.
+        auto it = std::find_if(tex->gpu_textures.begin(), tex->gpu_textures.end(),
+                               [&](const auto& a) { return a.gl == d.gpu_id; });
+        if (it != tex->gpu_textures.end()) {
+          tex->gpu_textures.erase(it);
+        }
+        if (tex->gpu_textures.empty()) {
+          tex->is_placeholder = true;
+        }
+        refresh_links(*tex);
+        release = true;
+      }
+    }
+    if (release) {
+      out_released.push_back(d.gpu_id);
+      m_deferred_unloads[i] = m_deferred_unloads.back();
+      m_deferred_unloads.pop_back();
+#if defined(__SWITCH__)
+      if (tex_probe_page(d.tex_id.page)) {
+        switch_run_logf("[pool] FIX124 deferred unload done %u/%u", d.tex_id.page, d.tex_id.tex);
+      }
+#endif
+    } else {
+      i++;
+    }
+  }
+  return m_deferred_unloads.size();
 }
 
 namespace {

@@ -20,7 +20,7 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 namespace dkdirect {
 namespace {
 
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 
 // GL DirectRenderer constructor: xyzf float4, rgba u8x4 normalized, stq float3,
 // tex_unit..fog u8x4 and use_uv u8 through glVertexAttribIPointer, scissor float4.

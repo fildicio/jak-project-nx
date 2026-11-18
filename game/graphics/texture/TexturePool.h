@@ -163,6 +163,12 @@ struct GpuTexture {
   // for these textures, the pool can assume that we are never a placeholder.
   bool is_common = false;
 
+  // FIX 124 (AI-assisted): frame of the last draw (0 = never drawn). Stamped
+  // by the render thread on every tbp lookup (lookup/lookup_mt4hh) and by the
+  // dkgl bind seam for ids bound without a lookup (note_draw_id); read by
+  // unload_texture_if_idle so a page still being drawn defers its unload.
+  u64 last_draw_frame = 0;
+
   // the size of our data, in bytes
   u32 data_size() const { return 4 * w * h; }
 
@@ -309,6 +315,31 @@ class TexturePool {
   // Switch a dkgl pseudo id becomes its dktexgpu id (T105 seam), as give_texture does.
   static u64 pool_id(GLuint gl_texture);
 
+  // ---- FIX 124 (AI-assisted): draw-stamp eviction guard (PS2 semantics) ------
+  // The PS2 never evicted a page a running level was still drawing -- level
+  // streaming only evicted far levels and the EE re-uploaded whatever it
+  // needed. The PC pool matches by combo id instead, so an adjacent level
+  // sharing a page could unload it while the active level still drew it
+  // (black walls / white-box Jak after area transitions on Switch).
+  //  - tick_frame() advances the draw-stamp clock (render thread, once per
+  //    frame, before the frame's lookups).
+  //  - note_draw_id() stamps ids bound through the dkgl seam (merc/Generic2
+  //    bind lev->textures ids directly; no tbp lookup happens for those).
+  //  - unload_texture_if_idle() = unload_texture, except a page drawn within
+  //    m_defer_frames frames keeps its GPU id: the unload is queued and
+  //    retried by retry_deferred_unloads (Loader::update, pool mutex held),
+  //    which hands freed ids back for the usual paced delete. Returns true
+  //    when the id was released now (caller queues the delete), false while
+  //    the unload is deferred.
+  //  - defer_frames() == 0 (desktop, or gk_dkgl_nopooldefer.txt on Switch) is
+  //    the old behavior exactly.
+  void tick_frame() { ++m_draw_frame; }
+  void set_defer_frames(u32 frames) { m_defer_frames = frames; }
+  u32 defer_frames() const { return m_defer_frames; }
+  void note_draw_id(u64 gpu_id);
+  bool unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id);
+  size_t retry_deferred_unloads(std::vector<u64>& out_released);
+
   /*!
    * Look up an OpenGL texture by vram address. Return std::nullopt if the game hasn't loaded
    * anything to this address.
@@ -330,6 +361,10 @@ class TexturePool {
           ASSERT(fnd);
         }
       }
+      // FIX 124 (AI-assisted): draw stamp. Lockless u64 store from the render
+      // thread -- the unloads that read it (Loader::update) run on the same
+      // thread, so there is no cross-thread race.
+      t.source->last_draw_frame = m_draw_frame;
       return t.gpu_texture;
     } else {
       return {};
@@ -384,6 +419,24 @@ class TexturePool {
 
   u32 m_next_pc_texture_to_allocate = 0;
   u32 m_tpage_dir_size = 0;
+
+  // FIX 124 (AI-assisted): draw-stamp clock, defer window, and the deferred
+  // unload queue. m_draw_frame and every stamp are render-thread-only (the
+  // lookups/binds that write stamps and the Loader::update that reads them
+  // run on the same thread), so no locking beyond the pool mutex the unload
+  // paths already hold.
+  u64 m_draw_frame = 0;
+  u32 m_defer_frames = 0;
+  // Per-id draw stamps for ids bound without a tbp lookup (dkgl bind seam).
+  // Indexed by dktexgpu store id; sized to the store's 4096 slots
+  // (kMaxTexImages, FIX 119). Ids outside the array (if any) simply don't
+  // defer -- they are always treated as idle.
+  std::array<u64, 4096> m_id_draw_stamps = {};
+  struct DeferredUnload {
+    PcTextureId tex_id;
+    u64 gpu_id;
+  };
+  std::vector<DeferredUnload> m_deferred_unloads;
 
   std::mutex m_mutex;
 };

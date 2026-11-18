@@ -159,7 +159,7 @@ constexpr u32 kSlotBytes = kCmdBytes + kCmdSpareBytes + kDataBytes + kUboBytes;
 constexpr u32 kPersistBytes = 2 * 1024 * 1024;
 constexpr u32 kMemBytes = kSlots * kSlotBytes + kPersistBytes;
 constexpr u32 kCodeBytes = 64 * 1024;
-constexpr u32 kTexImages = 2048;  // dktexgpu descriptor slots (dk_direct_record.cpp)
+constexpr u32 kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 
 struct Ring {
   u32 base = 0;  // offset into s_mem
@@ -177,6 +177,9 @@ DkGpuAddr s_gpu = 0;
 DkCmdBuf s_cb = nullptr;
 DkFence s_fence[kSlots];
 bool s_fence_armed[kSlots] = {};
+// J7: set by record_bucket when this frame actually called dkgl lists; record_frame_fence
+// signals the slot fence once per frame instead of per bucket (see record_bucket comment).
+bool s_frame_lists_called = false;
 Ring s_data[kSlots], s_ubo[kSlots], s_persist;
 u32 s_slot = 0;          // slot being recorded / last recorded
 u64 s_captures = 0;
@@ -212,6 +215,9 @@ struct Segment {
   DkImageRect blit_src{}, blit_dst{};
   bool blit_linear = false;
   bool blit_prev = false;  // §7.0 C: copy from last frame's image (jak2 BlitDisplays, bucket 3)
+  // §7.2 half-res sky (AI-assisted): the reverse direction -- blit_dst_tex is the SOURCE
+  // image, copied into the frame colour target (the sky composite). No list.
+  bool blit_to_frame = false;
   // T129a (AI-assisted): glGenerateMipmap -- level L-1 -> L blits inside blit_dst_tex.
   // blit_src holds the level-0 rect; the replay halves it per level.
   u32 blit_mips = 0;
@@ -349,8 +355,115 @@ bool is_jak2_tie_bucket(int b) {
 }
 constexpr int kJak2TieExtra = 5 * 6;  // 6 masters + 4 categories x 6 levels
 constexpr int kJak2TableMax = kJak2Count + kJak2EyeTexCount + kJak2TieExtra;
-constexpr int kMaxBuckets = kJak1Count > kJak2TableMax ? kJak1Count : kJak2TableMax;
+// J2 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md): the jak3 fixed
+// table, GL dispatch order (OpenGLRenderer::init_bucket_renderers_jak3 511-786).
+// Everything here runs a GL renderer class that already works through dkgl: blit
+// (BlitDisplays), sky + progress-hack (DirectRenderer), ocean x2, the lcom merc/generic
+// rows (incl. the PRIM gmerc2 row), generic-sprite-1/2 (PRIM) + generic-sprite-3
+// (LIGHTNING), shadow x3 (three Shadow2 instances, the §7.2 phase-2 pattern), warp
+// (T128 pattern), debug-no-zbuf1, the HUD progress trio (ProgressRenderer) + debug
+// trio (DirectRenderer).
+// Deliberately NOT here (census §2 / G-gaps): vis 2 (CPU-side, like jak2), hfrag 8
+// (native HfragDk takes it, J3), particles 570 (Sprite3 -- G1, no sprite3 program in
+// the dkgl table yet), the per-level NORMAL/TRANS tfrag + shrub DRAW buckets (the
+// native passes decide, J3) and the lcom-pris2 ids 456-460 (GL registers nothing
+// there either -- verified by grep 2026-11-18).
+// The per-level merc/gmerc/gmerc2 rows (16/level, water = merc + gmerc + gmerc2 +
+// tfrag-w) are added by init_jak3's stride loops, never hardcoded (10 levels,
+// GET_BUCKET_ID_FOR_LIST arithmetic -- the census stride rule).
+constexpr int kJak3Buckets[] = {
+    (int)jak3::BucketId::BLIT_START,
+    (int)jak3::BucketId::SKY,
+    (int)jak3::BucketId::OCEAN_MID_FAR,
+    (int)jak3::BucketId::PROGRESS_HACK,  // GL bucket 7 "progress-hack" (menu box hack)
+    (int)jak3::BucketId::MERC_LCOM_TFRAG,  (int)jak3::BucketId::GMERC_LCOM_TFRAG,
+    (int)jak3::BucketId::MERC_LCOM_SHRUB,
+    (int)jak3::BucketId::SHADOW,   // §7.2 phase-2 pattern: three Shadow2 instances
+    (int)jak3::BucketId::MERC_LCOM_PRIS,   (int)jak3::BucketId::GMERC_LCOM_PRIS,
+    (int)jak3::BucketId::GMERC2_LCOM_PRIS,  // "gmerc2-lcom-pris" (PRIM)
+    (int)jak3::BucketId::OCEAN_NEAR,
+    (int)jak3::BucketId::MERC_LCOM_WATER,  (int)jak3::BucketId::GMERC2_LCOM_WATER,
+    (int)jak3::BucketId::GENERIC_SPRITE_1,  // "generic-sprite-1" (PRIM)
+    (int)jak3::BucketId::GENERIC_SPRITE_2,  // "generic-sprite-2" (PRIM)
+    (int)jak3::BucketId::GENERIC_SPRITE_3,  // "generic-sprite-3" (LIGHTNING)
+    (int)jak3::BucketId::SHADOW2,           (int)jak3::BucketId::SHADOW3,
+    (int)jak3::BucketId::GENERIC_WARP,  // T128: "generic-warp"
+    (int)jak3::BucketId::DEBUG_NO_ZBUF1,  // 577 uploads (jak2 bucket 318 pattern)
+    (int)jak3::BucketId::HUD_DRAW_HUD_ALPHA,  // "hud-draw-hud-alpha"
+    (int)jak3::BucketId::HUD_DRAW_PRIS2,      // "hud-draw-pris2"
+    (int)jak3::BucketId::BUCKET582,           // "progress"
+    (int)jak3::BucketId::DEBUG,               (int)jak3::BucketId::DEBUG_NO_ZBUF2,
+    (int)jak3::BucketId::DEBUG_MENU,
+    kBlackoutList,
+    kTexAnimList,  // T125 pattern: above every real bucket id, like the blackout
+    kGlowList,    // T126
+    kDistortList};
+constexpr int kJak3Count = sizeof(kJak3Buckets) / sizeof(kJak3Buckets[0]);
+// jak3 eye.gc: like jak2, the level NPC eye DMA rides the tex buckets, so every tex id
+// GL gives a TextureUploadHandler becomes a PrisTexEyes list here: 6/level x 10,
+// lcom tfrag/shrub/pris/water + the singles 4 461 568 575 578 580. The lcom-pris2 tex
+// id 456 is unregistered in GL too (census §2), so it is not in the table at all.
+constexpr int kJak3EyeTexCount = 6 * 10 + 4 + 6;
+// §7.0 E pattern: the tie ids GL registers Tie3 renderers on. Per level the master
+// (TIE_Ln_TFRAG) + FIVE categories -- jak3 gives NORMAL_ENVMAP its own ETIE_Ln_TFRAG
+// bucket, jak2 has four categories.
+constexpr int jak3_tie_lvl(jak3::BucketId a, jak3::BucketId b, int i) {
+  return (int)a + ((int)b - (int)a) * i;
+}
+bool is_jak3_tie_bucket(int b) {
+  for (int l = 0; l < 10; l++) {
+    if (b == jak3_tie_lvl(jak3::BucketId::TIE_L0_TFRAG, jak3::BucketId::TIE_L1_TFRAG, l) ||
+        b == jak3_tie_lvl(jak3::BucketId::ETIE_L0_TFRAG, jak3::BucketId::ETIE_L1_TFRAG, l) ||
+        b == jak3_tie_lvl(jak3::BucketId::TIE_L0_ALPHA, jak3::BucketId::TIE_L1_ALPHA, l) ||
+        b == jak3_tie_lvl(jak3::BucketId::ETIE_L0_ALPHA, jak3::BucketId::ETIE_L1_ALPHA, l) ||
+        b == jak3_tie_lvl(jak3::BucketId::TIE_L0_WATER, jak3::BucketId::TIE_L1_WATER, l) ||
+        b == jak3_tie_lvl(jak3::BucketId::ETIE_L0_WATER, jak3::BucketId::ETIE_L1_WATER, l)) {
+      return true;
+    }
+  }
+  return false;
+}
+// The 16 per-level merc/generic/tfrag-water stride families init_jak3 registers
+// (census §3): the eye-list pass in init_jak3_foreground must skip exactly these.
+bool is_jak3_merc_bucket(int b) {
+  const struct {
+    jak3::BucketId a, b;
+  } fam[] = {
+      {jak3::BucketId::MERC_L0_TFRAG, jak3::BucketId::MERC_L1_TFRAG},
+      {jak3::BucketId::GMERC_L0_TFRAG, jak3::BucketId::GMERC_L1_TFRAG},
+      {jak3::BucketId::MERC_L0_SHRUB, jak3::BucketId::MERC_L1_SHRUB},
+      {jak3::BucketId::GMERC_L0_SHRUB, jak3::BucketId::GMERC_L1_SHRUB},
+      {jak3::BucketId::MERC_L0_ALPHA, jak3::BucketId::MERC_L1_ALPHA},
+      {jak3::BucketId::GMERC_L0_ALPHA, jak3::BucketId::GMERC_L1_ALPHA},
+      {jak3::BucketId::MERC_L0_PRIS, jak3::BucketId::MERC_L1_PRIS},
+      {jak3::BucketId::GMERC_L0_PRIS, jak3::BucketId::GMERC_L1_PRIS},
+      {jak3::BucketId::GMERC2_L0_PRIS, jak3::BucketId::GMERC2_L1_PRIS},
+      {jak3::BucketId::MERC_L0_PRIS2, jak3::BucketId::MERC_L1_PRIS2},
+      {jak3::BucketId::GMERC_L0_PRIS2, jak3::BucketId::GMERC_L1_PRIS2},
+      {jak3::BucketId::GMERC2_L0_PRIS2, jak3::BucketId::GMERC2_L1_PRIS2},
+      {jak3::BucketId::MERC_L0_WATER, jak3::BucketId::MERC_L1_WATER},
+      {jak3::BucketId::GMERC_L0_WATER, jak3::BucketId::GMERC_L1_WATER},
+      {jak3::BucketId::GMERC2_L0_WATER, jak3::BucketId::GMERC2_L1_WATER},
+      {jak3::BucketId::TFRAG_L0_WATER, jak3::BucketId::TFRAG_L1_WATER},
+  };
+  for (const auto& f : fam) {
+    for (int l = 0; l < 10; l++) {
+      if (jak3_tie_lvl(f.a, f.b, l) == b) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+constexpr int kJak3TieExtra = 6 * 10;   // master + 5 categories x 10 levels
+constexpr int kJak3MercExtra = 16 * 10;  // 16 merc/generic/tfrag-water rows per level
+constexpr int kJak3TableMax = kJak3Count + kJak3EyeTexCount + kJak3TieExtra + kJak3MercExtra;
+static_assert(kJak3TableMax == 321, "jak3-bucket-census.md section 3");
+constexpr int kMaxBuckets = kJak1Count > kJak2TableMax
+                               ? (kJak1Count > kJak3TableMax ? kJak1Count : kJak3TableMax)
+                               : (kJak2TableMax > kJak3TableMax ? kJak2TableMax : kJak3TableMax);
 int s_jak2_ids[kJak2TableMax];
+int s_jak3_ids[kJak3TableMax];
 // The active table (selected in init; defaults to jak1 so the file is safe pre-init).
 const int* s_bucket_ids = kJak1Buckets;
 int s_bucket_count = kJak1Count;
@@ -378,7 +491,7 @@ u32 s_census_idx_max[kMaxBuckets] = {};
 // Merc2's cost is CPU-side, so the b201/b205 draw counts give the per-draw divisor
 // for the glUniform / bone-UBO / int-skip counters printed next to them.
 u64 s_win_draws[kMaxBuckets] = {};
-int s_tie_census_idx[5 * 6];  // §7.0 E: master + 4 category list indexes per level
+int s_tie_census_idx[6 * 10];  // §7.0 E census: jak2 5/level, J2 jak3 6/level x 10
 int s_tie_census_n = 0;
 bool s_seg_open = false;
 bool s_seg_frame = false;
@@ -740,6 +853,25 @@ class SwitchEmitter final : public Emitter {
     s_lists[s_cur_bucket].segs.push_back(seg);
     open_segment(frame);
   }
+  // §7.2 half-res sky (AI-assisted): blit_tex_to_frame -- same shape as blit_frame_to_tex,
+  // but the blit runs image -> frame colour target at record time (the sky composite).
+  void blit_tex_to_frame(u32 dk_tex_id, const DkImageRect& src, const DkImageRect& dst,
+                         bool linear) override {
+    if (!s_recording || s_cur_bucket < 0) {
+      return;
+    }
+    const bool frame = s_seg_frame;
+    close_segment();
+    Segment seg;
+    seg.blit = true;
+    seg.blit_to_frame = true;
+    seg.blit_dst_tex = dk_tex_id;  // the SOURCE image in this direction
+    seg.blit_src = src;
+    seg.blit_dst = dst;
+    seg.blit_linear = linear;
+    s_lists[s_cur_bucket].segs.push_back(seg);
+    open_segment(frame);
+  }
   // T129a (AI-assisted): glGenerateMipmap on a dkgl render target. Same shape as
   // blit_frame_to_tex: end the list, queue a blit segment (record_bucket replays it as
   // level -> level blits inside the image), continue on the same target.
@@ -899,6 +1031,7 @@ std::unique_ptr<Generic2BucketRenderer> s_generic_buckets[kMaxBuckets];  // by l
 std::unique_ptr<ShadowRenderer> s_shadow;  // T113
 std::unique_ptr<Shadow2> s_shadow2_a;      // §7.2 phase 2: jak2 bucket 195 ("shadow")
 std::unique_ptr<Shadow2> s_shadow2_b;      // §7.2 phase 2: jak2 bucket 314 ("shadow2")
+std::unique_ptr<Shadow2> s_shadow2_c;      // J2: jak3 "shadow3" (GL registers Shadow2 x3)
 std::unique_ptr<DepthCue> s_depth_cue;     // T112
 std::shared_ptr<Merc2> s_merc2;            // TODO #5 / #19 (see kJak1Buckets)
 bool s_merc_native = false;                // #19: gk_dkgl_nativemerc.txt -> MercDk draws
@@ -907,15 +1040,21 @@ std::unique_ptr<Merc2BucketRenderer> s_merc_buckets[kMaxBuckets];  // by list in
 std::unique_ptr<DirectRenderer> s_sky_draw;       // §7.2 phase 1: jak2 bucket 5
 std::unique_ptr<DirectRenderer> s_screen_filter;  // §7.2 phase 1: jak2 bucket 321
 // §7.2 phase 2: jak2 menu/HUD late buckets (GL tail: progress 320, debug2 324,
-// debug-no-zbuf2 325, debug3 326).
+// debug-no-zbuf2 325, debug3 326). J2: jak3 reuses s_progress (BUCKET582) and the
+// debug trio members ("debug" / "debug-no-zbuf2" / "debug-menu") -- one game per
+// process, so the storage is shared, only the instances differ.
 std::unique_ptr<ProgressRenderer> s_progress;     // loading bars + pause-menu minimap
 std::unique_ptr<DirectRenderer> s_debug2;         // menus + HUD text
 std::unique_ptr<TextureUploadHandler> s_debug_no_zbuf1;  // 318: Dolby logo + black box
 std::unique_ptr<DirectRenderer> s_debug_no_zbuf2;
 std::unique_ptr<DirectRenderer> s_debug3;
+std::unique_ptr<DirectRenderer> s_progress_hack;  // J2: jak3 bucket 7 "progress-hack"
+std::unique_ptr<ProgressRenderer> s_hud_progress_a;  // J2: jak3 "hud-draw-hud-alpha"
+std::unique_ptr<ProgressRenderer> s_hud_progress_b;  // J2: jak3 "hud-draw-pris2"
 std::unique_ptr<Warp> s_warp;  // T128: jak2 gmerc-warp 317
 std::unique_ptr<BlitDisplays> s_blit;  // §7.0 C: jak2 bucket 3 (menu backdrop = last frame)
-std::unique_ptr<TFragment> s_water_tfrags[6];  // §7.0 D: jak2 tfrag-w-l{0..5}-water
+// §7.0 D: jak2 tfrag-w-l{0..5}-water; J2: jak3 tfrag-l{0..9}-water (TFRAG_Ln_WATER).
+std::unique_ptr<TFragment> s_water_tfrags[10];
 
 // §7.0 E (AI-assisted): jak2 tie categories. The master Tie3 runs on the TIE_L{n}_TFRAG
 // bucket (setup only -- the native TieDk draws NORMAL + wind there), and the four
@@ -930,8 +1069,12 @@ class Tie3SetupOnly final : public Tie3 {
     render_setup_only(dma, render_state, prof);
   }
 };
-std::unique_ptr<Tie3> s_tie_masters[6];                    // tie-l{0..5}-tfrag
-std::unique_ptr<Tie3AnotherCategory> s_tie_cats[4][6];     // TRANS/TRANS_ENV/WATER/WATER_ENV
+// §7.0 E: jak2 masters tie-l{0..5}; J2: jak3 tie-l{0..9}. Only one game is active per
+// process, so jak2 leaves slots 6-9 null and jak3 uses them all.
+std::unique_ptr<Tie3> s_tie_masters[10];
+// §7.0 E: jak2 4 cats x 6 levels; J2: jak3 5 cats (NORMAL_ENVMAP gets its own
+// ETIE_Ln_TFRAG bucket) x 10 levels.
+std::unique_ptr<Tie3AnotherCategory> s_tie_cats[5][10];
 
 
 // #19 (AI-assisted): jak1 eye.gc puts each level's NPC eyes in that level's pris-tex bucket
@@ -966,6 +1109,7 @@ class PrisTexEyes : public BucketRenderer {
 };
 std::unique_ptr<PrisTexEyes> s_pris_tex_eyes[2];  // buckets 48, 51
 std::vector<std::unique_ptr<PrisTexEyes>> s_jak2_tex_eyes;  // jak2 eye-capable tex buckets
+std::vector<std::unique_ptr<PrisTexEyes>> s_jak3_tex_eyes;  // J2: jak3 eye-capable tex buckets
 // Merc2 reads m_anim_slot_array->at(slot) for animated textures (jak2+ only; jak1 never uses
 // them). Zeros = "no texture", sized past jak1's slot count so at() never throws.
 const std::vector<GLuint> s_no_anim_slots(256, 0);
@@ -974,6 +1118,9 @@ const std::vector<GLuint> s_no_anim_slots(256, 0);
 // through the first ("-norm"/"-start") palette, exactly ClutBlender's constructor run.
 // No Dark Jak morph yet, but the head draws instead of sampling texture 0.
 std::vector<GLuint> s_jak2_anim_slots(256, 0);
+// J2 (AI-assisted): jak3 Merc2 animated-texture slots. Zeros for now (the pre-T125
+// jak2 stopgap); the clut-blender fill (§7.0 F pattern, jak3 groups) is a J3 follow-up.
+std::vector<GLuint> s_jak3_anim_slots(256, 0);
 const tfrag3::Level* s_common_level = nullptr;
 
 const tfrag3::IndexTexture* find_itex(const std::string& name, const char* dgo) {
@@ -987,35 +1134,30 @@ const tfrag3::IndexTexture* find_itex(const std::string& name, const char* dgo) 
   return nullptr;
 }
 
-// TextureAnimatorDefs.cpp setup_texture_anims_jak2: the clut-blender groups, first palette.
-int fill_jak2_clut_slots() {
+// TextureAnimatorDefs.cpp setup_texture_anims_jak2/jak3: the clut-blender groups, first
+// palette. J4 (AI-assisted): shared body -- a slot's static default is the dest texture's
+// indices coloured by its group's FIRST palette (GL: whichever group ran last that frame;
+// here the first fill wins).
+struct ClutSlotGroup {
+  const char* suffix;
+  const char* dgo;
+  std::vector<const char*> names;
+};
+int fill_clut_slots(const ClutSlotGroup* groups,
+                    size_t group_count,
+                    const std::vector<std::string>& slot_names,
+                    std::vector<GLuint>& slots) {
   if (!s_common_level) {
     return 0;
   }
-  struct Group {
-    const char* suffix;
-    const char* dgo;
-    std::vector<const char*> names;
-  };
-  const Group groups[] = {
-      {"-norm", nullptr, {"jakbsmall-eyebrow", "jakbsmall-face", "jakbsmall-finger",
-                          "jakbsmall-hair"}},
-      {"-start", "LDJAKBRN.DGO", {"jak-orig-arm-formorph", "jak-orig-eyebrow-formorph",
-                                  "jak-orig-finger-formorph"}},
-      {"-norm", "LDJAKBRN.DGO", {"jakb-facelft", "jakb-facert", "jakb-hairtrans"}},
-      {"-norm", "ORACLE.DGO", {"jakb-eyebrow", "jakb-eyelid", "jakb-facelft", "jakb-facert",
-                               "jakb-hairtrans"}},
-      {"-norm", "NEB.DGO", {"jakb-eyebrow", "jakb-eyelid", "jakb-facelft", "jakb-facert",
-                            "jakb-hairtrans"}},
-  };
-  const auto& names = jak2_animated_texture_slots();
   int filled = 0;
   std::vector<u32> rgba;
-  for (const auto& g : groups) {
+  for (size_t gi = 0; gi < group_count; gi++) {
+    const ClutSlotGroup& g = groups[gi];
     for (const char* name : g.names) {
-      const auto it = std::find(names.begin(), names.end(), name);
-      const size_t slot = (size_t)(it - names.begin());
-      if (it == names.end() || s_jak2_anim_slots[slot] != 0) {
+      const auto it = std::find(slot_names.begin(), slot_names.end(), name);
+      const size_t slot = (size_t)(it - slot_names.begin());
+      if (it == slot_names.end() || slots[slot] != 0) {
         continue;  // first group wins (GL: whichever group ran last that frame)
       }
       const auto* dest = find_itex(name, g.dgo);
@@ -1029,12 +1171,42 @@ int fill_jak2_clut_slots() {
       }
       const u32 id = dktexgpu::upload_rgba8_mipped(dest->w, dest->h, rgba.data());
       if (id != 0) {
-        s_jak2_anim_slots[slot] = id;
+        slots[slot] = id;
         filled++;
       }
     }
   }
   return filled;
+}
+int fill_jak2_clut_slots() {
+  const ClutSlotGroup groups[] = {
+      {"-norm", nullptr, {"jakbsmall-eyebrow", "jakbsmall-face", "jakbsmall-finger",
+                          "jakbsmall-hair"}},
+      {"-start", "LDJAKBRN.DGO", {"jak-orig-arm-formorph", "jak-orig-eyebrow-formorph",
+                                  "jak-orig-finger-formorph"}},
+      {"-norm", "LDJAKBRN.DGO", {"jakb-facelft", "jakb-facert", "jakb-hairtrans"}},
+      {"-norm", "ORACLE.DGO", {"jakb-eyebrow", "jakb-eyelid", "jakb-facelft", "jakb-facert",
+                               "jakb-hairtrans"}},
+      {"-norm", "NEB.DGO", {"jakb-eyebrow", "jakb-eyelid", "jakb-facelft", "jakb-facert",
+                            "jakb-hairtrans"}},
+  };
+  return fill_clut_slots(groups, sizeof(groups) / sizeof(groups[0]),
+                         jak2_animated_texture_slots(), s_jak2_anim_slots);
+}
+// J4 (AI-assisted, jak3 bringup): the jak3 clut-blender groups (TextureAnimatorDefs.cpp
+// setup_texture_anims_jak3 -- the J2/J3 leftover folded into the J4 wiring): dark-jak's
+// body textures + the MHCTYCST high-res head, both groups' first palette is "-norm".
+// Without these the dark-jak clut blenders sample slot 0 (jak2's pre-T125 stopgap).
+int fill_jak3_clut_slots() {
+  const ClutSlotGroup groups[] = {
+      {"-norm", nullptr,
+       {"jakc-arm", "jakc-eyebrow", "jakc-face", "jakc-finger", "jakc-hair"}},
+      {"-norm", "MHCTYCST.DGO",
+       {"jakchires-arm", "jakchires-eye", "jakchires-eyebrow", "jakchires-eyelid",
+        "jakchires-facelft", "jakchires-facert", "jakchires-hair"}},
+  };
+  return fill_clut_slots(groups, sizeof(groups) / sizeof(groups[0]),
+                         jak3_animated_texture_slots(), s_jak3_anim_slots);
 }
 std::unique_ptr<FullScreenDraw> s_blackout;  // pmode_alp fade (OpenGLRenderer m_blackout_renderer)
 // T125 (AI-assisted): the UNCHANGED GL TextureAnimator, run through dkgl like Merc2/Shadow2
@@ -1048,9 +1220,12 @@ GLuint s_tex_anim_dummy = 0;     // the animator's "no output" id (all slots at 
 // clut defaults, so copy every real animator output over them after each dispatch.
 void merge_tex_anim_slots() {
   const auto& pub = *s_tex_anim->slots();
-  for (size_t i = 0; i < pub.size() && i < s_jak2_anim_slots.size(); i++) {
+  // J4 (jak3): the gen-2 games each have their own slot vector (their slot name lists
+  // differ -- Merc2's anim_slot_array is the active game's).
+  auto& dst = g_game_version == GameVersion::Jak3 ? s_jak3_anim_slots : s_jak2_anim_slots;
+  for (size_t i = 0; i < pub.size() && i < dst.size(); i++) {
     if (pub[i] != s_tex_anim_dummy) {
-      s_jak2_anim_slots[i] = pub[i];
+      dst[i] = pub[i];
     }
   }
 }
@@ -1186,6 +1361,105 @@ bool flag(const char* name) {
   return access(path, F_OK) == 0;
 }
 
+// ---- §7.2 half-res sky (AI-assisted) ---------------------------------------------------------
+// The jak2 sky-draw bucket (DirectRenderer, GL bucket 5) is the top GPU item at ~3 ms/frame:
+// ~25 alpha-blended full-screen layers filling the whole 1280x720 frame target, every frame,
+// even with the in-game low-res cloud setting (that only lowers texture detail, not fill).
+// This renders the bucket into a half-res colour-only FBO instead (distort T127 object
+// pattern): downscale-blit the frame into it first (so the sky blends over the SAME content
+// as GL -- bucket 3's backdrop copy / the clear colour), bind it + a half viewport, run the
+// captured draws (direct.vert maps GOAL window coords to NDC, so the same vertices fill the
+// half-res target exactly), then blit the result back over the frame with a linear filter.
+// ~4x less fill on the 3D engine for ~0.6 ms of 2D-engine blits.
+// Semantics notes:
+// - the sky writes depth at the far plane (DirectRenderer.cpp sky-draw fast path); the
+//   half-res target has NO depth attachment, so those writes are dropped. Unobservable in
+//   practice: the frame depth is still at its clear value 0.0 (P5, GEQUAL) when the sky
+//   draws, and "every later z-tested draw still passes" against the far plane (the original
+//   fast-path argument) holds a fortiori against the clear value.
+// - orientation: no FlipY on the composite blit -- the sky image receives the frame content
+//   through blit_frame_to (unflipped) and 3D draws with the same GL-style origin as the frame
+//   target, so copying back with aligned origins preserves orientation (P4 only bites when
+//   one side is a swapchain image, as in present_frame).
+// - A/B kill switch: sdmc:/switch/jak2/gk_dkgl_fullsky.txt restores the full-res path.
+u32 s_sky_fbo = 0, s_sky_tex = 0;   // GL objects, created on first use (distort pattern)
+int s_sky_w = 0, s_sky_h = 0;       // current half-res target size
+int s_sky_fullres = -1;             // gk_dkgl_fullsky.txt: 1 = keep the full-res path
+u64 s_sky_halfres_frames = 0, s_sky_halfres_fail = 0;
+
+void sky_make_objects() {
+  gen_framebuffers(1, &s_sky_fbo);
+  gen_textures(1, &s_sky_tex);
+  bind_framebuffer(s_sky_fbo);
+  framebuffer_texture_2d(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, s_sky_tex, 0);
+  bind_framebuffer(0);
+}
+
+bool sky_halfres_wants(int bucket) {
+  if (g_game_version != GameVersion::Jak2 || bucket != (int)jak2::BucketId::SKY_DRAW) {
+    return false;
+  }
+  if (s_sky_fullres < 0) {
+    s_sky_fullres = flag("gk_dkgl_fullsky.txt") ? 1 : 0;
+    if (!s_sky_fullres) {
+      switch_run_logf("[dkgl] sky half-res on (gk_dkgl_fullsky.txt to disable)");
+    }
+  }
+  return s_sky_fullres == 0;
+}
+
+// Called instead of the normal viewport+bind_framebuffer(0) prologue of run_bucket. On
+// success the half-res FBO is bound (the target switch flushes at the bucket's first draw,
+// like the ocean's) and the frame snapshot blit is queued; the caller must NOT call
+// pending_target_consumed() in that case -- the pending switch is the offscreen bind.
+bool sky_halfres_begin() {
+  if (!s_sky_fbo) {
+    sky_make_objects();
+  }
+  const int hw = s_fb_w / 2, hh = s_fb_h / 2;
+  if (hw <= 0 || hh <= 0) {
+    return false;
+  }
+  if (s_sky_w != hw || s_sky_h != hh) {
+    bind_texture(s_sky_tex);
+    if (!tex_image_2d(0, gl::RGBA, hw, hh, gl::RGBA, gl::UNSIGNED_BYTE, nullptr)) {
+      s_sky_halfres_fail++;
+      return false;  // nothing bound yet: run_bucket falls back to the full-res path
+    }
+    s_sky_w = hw;
+    s_sky_h = hh;
+  }
+  // read FBO 0 = the frame target (like the distort snapshot); bind the sky FBO so the
+  // blit's dst resolves to its attached texture, then downscale the frame into it.
+  bind_framebuffer_target(gl::READ_FRAMEBUFFER, 0);
+  bind_framebuffer(s_sky_fbo);
+  if (!blit_framebuffer(0, 0, s_fb_w, s_fb_h, 0, 0, hw, hh, gl::COLOR_BUFFER_BIT, gl::LINEAR)) {
+    bind_framebuffer(0);
+    pending_target_consumed();
+    s_sky_halfres_fail++;
+    return false;
+  }
+  viewport(0, 0, hw, hh);
+  s_sky_halfres_frames++;
+  return true;
+}
+
+// Called right after the sky renderer ran: back to the frame target and queue the composite
+// blit (replayed at record time, after the bucket's draw list).
+void sky_halfres_end() {
+  bind_framebuffer(0);  // leaves the sky FBO: T106 marks its texture rendered-to
+  const u32 dk = materialized_dk_tex(s_sky_tex);
+  if (dk != 0) {
+    const DkImageRect src{0, 0, 0, (u32)s_sky_w, (u32)s_sky_h, 1};
+    const DkImageRect dst{0, 0, 0, (u32)s_fb_w, (u32)s_fb_h, 1};
+    s_emitter.blit_tex_to_frame(dk, src, dst, true);
+  } else {
+    s_sky_halfres_fail++;
+  }
+  // the queued frame-target switch is handled by the reopened segment's frame_target flag
+  pending_target_consumed();
+}
+
 void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucket, int list_idx) {
   s_cur_bucket = list_idx;
   s_lists[list_idx].segs.clear();
@@ -1193,12 +1467,16 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   begin_bucket();
   s_emitter.bucket_start();
   // OpenGLRenderer::setup_frame: glViewport(0, 0, game_res_w, game_res_h) before dispatch;
-  // the frame target is FBO 0 at every bucket boundary.
-  viewport(0, 0, s_fb_w, s_fb_h);
-  if (bound_framebuffer() != 0) {
-    bind_framebuffer(0);
+  // the frame target is FBO 0 at every bucket boundary. (The §7.2 half-res sky bucket skips
+  // this prologue: sky_halfres_begin binds the half-res FBO instead, below open_segment.)
+  const bool sky_wants = sky_halfres_wants(bucket);
+  if (!sky_wants) {
+    viewport(0, 0, s_fb_w, s_fb_h);
+    if (bound_framebuffer() != 0) {
+      bind_framebuffer(0);
+    }
+    pending_target_consumed();  // the caller binds the frame target before the first list
   }
-  pending_target_consumed();  // the caller binds the frame target before the first list
   if (bucket == 64) {
     // T112: DepthCue never sets blend / depth test itself; on GL it inherits what
     // CommonOceanRenderer::flush_near left (ocean-near 63 runs right before). Here 63 is
@@ -1209,6 +1487,18 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   }
   s_color_mask = DkColorMask_RGBA;  // begin_bucket reset the cache: start from GL defaults
   open_segment(true);
+  // §7.2 half-res sky: bind the half-res FBO + queue the frame snapshot blit (after
+  // open_segment, so blit_frame_to_tex has a segment to close). On failure fall back to
+  // the normal full-res prologue.
+  bool sky_halfres = sky_wants;
+  if (sky_halfres && !sky_halfres_begin()) {
+    sky_halfres = false;
+    viewport(0, 0, s_fb_w, s_fb_h);
+    if (bound_framebuffer() != 0) {
+      bind_framebuffer(0);
+    }
+    pending_target_consumed();
+  }
   const u32 slot = buckets_base + 16 * (u32)bucket;
   s_srs->next_bucket = slot + 16;
   DmaFollower dma(data, slot);
@@ -1217,6 +1507,11 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
     ProfilerNode node(r->name_and_id());
     ScopedProfilerNode prof(&node);
     r->render(dma, s_srs.get(), prof);
+  }
+  // §7.2 half-res sky: back to the frame target + queue the composite blit (replayed after
+  // this bucket's draw list, before the next segment).
+  if (sky_halfres) {
+    sky_halfres_end();
   }
   // Row P (AI-assisted): like OpenGLRenderer FIX 43, never leave a background sampler bound
   // into the next bucket or the texture animator; it overrides their texture wrap/filter
@@ -1527,6 +1822,240 @@ bool init_jak2_foreground(TexturePool* pool, int loaded) {
   return true;
 }
 
+// J2 (AI-assisted, jak3 bringup): the merc2/generic2 half of init_jak3 (the
+// init_jak2_foreground split, kept so each edit stays small). Mirror of
+// OpenGLRenderer::init_bucket_renderers_jak3: the 16 merc/generic rows per level (the
+// PRIM gmerc2 rows included), the water tfrag (jak3 merges jak2's tfrag-w bucket into
+// the water list, TFRAG_Ln_WATER), the tie master + FIVE categories (jak3 gives
+// NORMAL_ENVMAP its own ETIE_Ln_TFRAG bucket), the lcom rows, warp (T128), blit and
+// the eye-capable tex buckets as PrisTexEyes lists (the jak2 §7.0 trade: eye DMA
+// drawn, upload replay left to the native walk).
+bool init_jak3_foreground(TexturePool* pool, int loaded) {
+  s_generic2 = std::make_shared<Generic2>(s_srs->shaders);
+  // J4 (AI-assisted): the static clut defaults of the jak3 clut-blender slots (the §7.0 F
+  // pattern, jak2's T125 follow-up -- the fill_jak3_clut_slots leftover from J2/J3 folded
+  // in here). Before the first animator dispatch these are what Merc2's dark-jak draws
+  // sample; merge_tex_anim_slots copies the animator's outputs over them per dispatch.
+  const int anim_slots = fill_jak3_clut_slots();
+  switch_run_logf("[dkgl] jak3 anim slots: %d/%d static clut textures (common level %s)",
+                  anim_slots, (int)jak3_animated_texture_slots().size(),
+                  s_common_level ? "ok" : "MISSING");
+  set_anim_slots(s_jak3_anim_slots.data(), s_jak3_anim_slots.size());
+  s_merc2 = std::make_shared<Merc2>(s_srs->shaders, &s_jak3_anim_slots);
+  s_eyes = std::make_unique<EyeRenderer>("eyes", 0);
+  s_eyes->init_shaders(s_srs->shaders);
+  s_eyes->init_textures(*pool, GameVersion::Jak3);
+  s_srs->eye_renderer = s_eyes.get();
+  char name[32];
+  int eye_lists = 0;
+  for (int i = 0; i < s_bucket_count; i++) {
+    const int b = s_bucket_ids[i];
+    const bool listed =
+        (std::find(kJak3Buckets, kJak3Buckets + kJak3Count, b) != kJak3Buckets + kJak3Count) ||
+        is_jak3_tie_bucket(b) || is_jak3_merc_bucket(b);
+    if (!listed) {  // the merged-in tex buckets (init_jak3)
+      snprintf(name, sizeof(name), "tex-eyes-%d", b);
+      s_jak3_tex_eyes.push_back(std::make_unique<PrisTexEyes>(name, b));
+      s_renderers[i] = s_jak3_tex_eyes.back().get();
+      s_eye_list[i] = true;
+      eye_lists++;
+    }
+  }
+  switch_run_logf("[dkgl] jak3 eyes: %d tex-bucket eye lists", eye_lists);
+  int mercs = 0, generics = 0;
+  auto add_generic = [&](int bucket, const char* pattern, int level, Generic2::Mode mode) {
+    const int i = list_index(bucket);
+    if (i >= 0) {
+      snprintf(name, sizeof(name), pattern, level);
+      s_generic_buckets[i] =
+          std::make_unique<Generic2BucketRenderer>(name, bucket, s_generic2, mode);
+      s_generic_buckets[i]->init_shaders(s_srs->shaders);
+      s_generic_buckets[i]->init_textures(*pool, GameVersion::Jak3);
+      s_renderers[i] = s_generic_buckets[i].get();
+      generics++;
+    } else {
+      switch_run_logf("[dkgl] jak3: bucket %d (%s) missing from kJak3Buckets", bucket, pattern);
+    }
+  };
+  auto add_merc = [&](int bucket, const char* pattern, int level) {
+    const int i = list_index(bucket);
+    if (i >= 0) {
+      snprintf(name, sizeof(name), pattern, level);
+      s_merc_buckets[i] = std::make_unique<Merc2BucketRenderer>(name, bucket, s_merc2);
+      s_renderers[i] = s_merc_buckets[i].get();
+      mercs++;
+    } else {
+      switch_run_logf("[dkgl] jak3: bucket %d (%s) missing from kJak3Buckets", bucket, pattern);
+    }
+  };
+  auto lvl = [](jak3::BucketId a, jak3::BucketId b, int i) {
+    return (int)a + ((int)b - (int)a) * i;
+  };
+  for (int l = 0; l < 10; l++) {
+    add_generic(lvl(jak3::BucketId::GMERC_L0_TFRAG, jak3::BucketId::GMERC_L1_TFRAG, l),
+                "gmerc-l%d-tfrag", l, Generic2::Mode::NORMAL);
+    add_merc(lvl(jak3::BucketId::MERC_L0_TFRAG, jak3::BucketId::MERC_L1_TFRAG, l),
+             "merc-l%d-tfrag", l);
+    add_generic(lvl(jak3::BucketId::GMERC_L0_SHRUB, jak3::BucketId::GMERC_L1_SHRUB, l),
+                "gmerc-l%d-shrub", l, Generic2::Mode::NORMAL);
+    add_merc(lvl(jak3::BucketId::MERC_L0_SHRUB, jak3::BucketId::MERC_L1_SHRUB, l),
+             "merc-l%d-shrub", l);
+    add_generic(lvl(jak3::BucketId::GMERC_L0_ALPHA, jak3::BucketId::GMERC_L1_ALPHA, l),
+                "gmerc-l%d-alpha", l, Generic2::Mode::NORMAL);
+    add_merc(lvl(jak3::BucketId::MERC_L0_ALPHA, jak3::BucketId::MERC_L1_ALPHA, l),
+             "merc-l%d-alpha", l);
+    add_generic(lvl(jak3::BucketId::GMERC_L0_PRIS, jak3::BucketId::GMERC_L1_PRIS, l),
+                "gmerc-l%d-pris", l, Generic2::Mode::NORMAL);
+    add_generic(lvl(jak3::BucketId::GMERC2_L0_PRIS, jak3::BucketId::GMERC2_L1_PRIS, l),
+                "gmerc2-l%d-pris", l, Generic2::Mode::PRIM);
+    add_merc(lvl(jak3::BucketId::MERC_L0_PRIS, jak3::BucketId::MERC_L1_PRIS, l),
+             "merc-l%d-pris", l);
+    add_generic(lvl(jak3::BucketId::GMERC_L0_PRIS2, jak3::BucketId::GMERC_L1_PRIS2, l),
+                "gmerc-l%d-pris2", l, Generic2::Mode::NORMAL);
+    add_generic(lvl(jak3::BucketId::GMERC2_L0_PRIS2, jak3::BucketId::GMERC2_L1_PRIS2, l),
+                "gmerc2-l%d-pris2", l, Generic2::Mode::PRIM);
+    add_merc(lvl(jak3::BucketId::MERC_L0_PRIS2, jak3::BucketId::MERC_L1_PRIS2, l),
+             "merc-l%d-pris2", l);
+    add_generic(lvl(jak3::BucketId::GMERC_L0_WATER, jak3::BucketId::GMERC_L1_WATER, l),
+                "gmerc-l%d-water", l, Generic2::Mode::NORMAL);
+    add_generic(lvl(jak3::BucketId::GMERC2_L0_WATER, jak3::BucketId::GMERC2_L1_WATER, l),
+                "gmerc2-l%d-water", l, Generic2::Mode::PRIM);
+    add_merc(lvl(jak3::BucketId::MERC_L0_WATER, jak3::BucketId::MERC_L1_WATER, l),
+             "merc-l%d-water", l);
+  }
+  // §7.0 D pattern: the water tfrags (GL "tfrag-l%d-water", TFragmentTreeKind::WATER).
+  // jak3 folds jak2's tfrag-w bucket into the water list, so the stride family is
+  // TFRAG_Ln_WATER here. no_multidraw: dkgl has no EXT_indexed_multi_draw (the GL
+  // TFragment would call a null pointer), same as jak2.
+  s_srs->no_multidraw = true;
+  int water_tfrags = 0;
+  for (int l = 0; l < 10; l++) {
+    const int bucket = lvl(jak3::BucketId::TFRAG_L0_WATER, jak3::BucketId::TFRAG_L1_WATER, l);
+    const int i = list_index(bucket);
+    if (i >= 0) {
+      snprintf(name, sizeof(name), "tfrag-l%d-water", l);
+      s_water_tfrags[l] = std::make_unique<TFragment>(
+          name, bucket, std::vector{tfrag3::TFragmentTreeKind::WATER}, false, l,
+          &s_jak3_anim_slots);
+      s_water_tfrags[l]->init_shaders(s_srs->shaders);
+      s_renderers[i] = s_water_tfrags[l].get();
+      water_tfrags++;
+    } else {
+      switch_run_logf("[dkgl] jak3: bucket %d (tfrag-l%d-water) missing from kJak3Buckets",
+                      bucket, l);
+    }
+  }
+  // §7.0 E pattern: tie masters (setup only -- the native TieDk draws NORMAL there,
+  // the J3 decision) + the categories through tfrag3, the same shared draw path as
+  // the §7.0 D tfrag water. jak3 has FIVE categories: NORMAL_ENVMAP gets its own
+  // ETIE_Ln_TFRAG bucket. A/B flag: gk_dkgl_notie.txt.
+  int tie_masters = 0, tie_cats = 0;
+  if (!flag("gk_dkgl_notie.txt")) {
+    const struct {
+      jak3::BucketId a, b;
+      const char* pattern;
+      tfrag3::TieCategory cat;
+    } cats[] = {
+        {jak3::BucketId::ETIE_L0_TFRAG, jak3::BucketId::ETIE_L1_TFRAG, "etie-l%d-tfrag",
+         tfrag3::TieCategory::NORMAL_ENVMAP},
+        {jak3::BucketId::TIE_L0_ALPHA, jak3::BucketId::TIE_L1_ALPHA, "tie-t-l%d-alpha",
+         tfrag3::TieCategory::TRANS},
+        {jak3::BucketId::ETIE_L0_ALPHA, jak3::BucketId::ETIE_L1_ALPHA, "etie-l%d-alpha",
+         tfrag3::TieCategory::TRANS_ENVMAP},
+        {jak3::BucketId::TIE_L0_WATER, jak3::BucketId::TIE_L1_WATER, "tie-w-l%d-water",
+         tfrag3::TieCategory::WATER},
+        {jak3::BucketId::ETIE_L0_WATER, jak3::BucketId::ETIE_L1_WATER, "etie-l%d-water",
+         tfrag3::TieCategory::WATER_ENVMAP},
+    };
+    for (int l = 0; l < 10; l++) {
+      const int mb = lvl(jak3::BucketId::TIE_L0_TFRAG, jak3::BucketId::TIE_L1_TFRAG, l);
+      const int mi = list_index(mb);
+      if (mi < 0) {
+        switch_run_logf("[dkgl] jak3: bucket %d (tie-l%d-tfrag master) missing from the table",
+                        mb, l);
+        continue;
+      }
+      snprintf(name, sizeof(name), "tie-l%d-tfrag", l);
+      s_tie_masters[l] = std::make_unique<Tie3SetupOnly>(name, mb, l, &s_jak3_anim_slots,
+                                                         tfrag3::TieCategory::NORMAL);
+      s_tie_masters[l]->init_shaders(s_srs->shaders);
+      // §7.0 E HW debug: gk_dkgl_noenvmap2.txt drops only the additive envmap second
+      // pass (A/B for the jak2 266-vs-265 GPU asymmetry).
+      if (flag("gk_dkgl_noenvmap2.txt")) {
+        s_tie_masters[l]->set_draw_envmap_second_draw(false);
+      }
+      s_renderers[mi] = s_tie_masters[l].get();
+      if (s_tie_census_n < (int)(sizeof(s_tie_census_idx) / sizeof(s_tie_census_idx[0]))) {
+        s_tie_census_idx[s_tie_census_n++] = mi;  // §7.0 E census: master first
+      }
+      tie_masters++;
+      for (int c = 0; c < 5; c++) {
+        const int bucket = lvl(cats[c].a, cats[c].b, l);
+        const int i = list_index(bucket);
+        if (i < 0) {
+          switch_run_logf("[dkgl] jak3: bucket %d (%s) missing from the table", bucket,
+                          cats[c].pattern);
+          continue;
+        }
+        snprintf(name, sizeof(name), cats[c].pattern, l);
+        s_tie_cats[c][l] =
+            std::make_unique<Tie3AnotherCategory>(name, bucket, s_tie_masters[l].get(),
+                                                  cats[c].cat);
+        s_renderers[i] = s_tie_cats[c][l].get();
+        if (s_tie_census_n < (int)(sizeof(s_tie_census_idx) / sizeof(s_tie_census_idx[0]))) {
+          s_tie_census_idx[s_tie_census_n++] = i;  // §7.0 E census: categories after
+        }
+        tie_cats++;
+      }
+    }
+    switch_run_logf("[dkgl] jak3 tie categories: %d masters + %d category buckets",
+                    tie_masters, tie_cats);
+  }
+  add_merc((int)jak3::BucketId::MERC_LCOM_TFRAG, "merc-lcom-tfrag", 0);
+  add_generic((int)jak3::BucketId::GMERC_LCOM_TFRAG, "gmerc-lcom-tfrag", 0,
+              Generic2::Mode::NORMAL);
+  add_merc((int)jak3::BucketId::MERC_LCOM_SHRUB, "merc-lcom-shrub", 0);
+  add_merc((int)jak3::BucketId::MERC_LCOM_PRIS, "merc-lcom-pris", 0);
+  add_generic((int)jak3::BucketId::GMERC_LCOM_PRIS, "gmerc-lcom-pris", 0,
+              Generic2::Mode::NORMAL);
+  add_generic((int)jak3::BucketId::GMERC2_LCOM_PRIS, "gmerc2-lcom-pris", 0,
+              Generic2::Mode::PRIM);
+  add_merc((int)jak3::BucketId::MERC_LCOM_WATER, "merc-lcom-water", 0);
+  // GL name is "generic2-lcom-water" on GMERC2_LCOM_WATER (PRIM) -- not a typo.
+  add_generic((int)jak3::BucketId::GMERC2_LCOM_WATER, "generic2-lcom-water", 0,
+              Generic2::Mode::PRIM);
+  {
+    // T128 pattern: GL registers Warp on GENERIC_WARP ("generic-warp"); its
+    // FramebufferCopier goes through the dkgl overrides (FBO + texture), like the
+    // jak2 warp.
+    const int i = list_index((int)jak3::BucketId::GENERIC_WARP);
+    if (i >= 0) {
+      s_warp =
+          std::make_unique<Warp>("generic-warp", (int)jak3::BucketId::GENERIC_WARP, s_generic2);
+      s_warp->init_shaders(s_srs->shaders);
+      s_warp->init_textures(*pool, GameVersion::Jak3);
+      s_renderers[i] = s_warp.get();
+    }
+  }
+  {
+    // GL "blit" on BLIT_START. The jak3 menu backdrop copy, the §7.0 C BlitDisplays
+    // pattern (blit_prev: reads last frame's image).
+    const int i = list_index((int)jak3::BucketId::BLIT_START);
+    if (i >= 0) {
+      s_blit = std::make_unique<BlitDisplays>("blit", (int)jak3::BucketId::BLIT_START);
+      s_blit->init_shaders(s_srs->shaders);
+      s_blit->init_textures(*pool, GameVersion::Jak3);
+      s_renderers[i] = s_blit.get();
+    }
+  }
+  s_blackout = std::make_unique<FullScreenDraw>();  // static quad -> persistent storage
+  switch_run_logf(
+      "[dkgl] jak3 init ok: programs=%d buckets=%d (merc2 x%d generic2 x%d + sky,"
+      " progress-hack, ocean x2, warp, blit, tfrag-w x%d) mem=%u KB persistent used=%u B",
+      loaded, s_bucket_count, mercs, generics, water_tfrags, kMemBytes / 1024, s_persist.used);
+  return true;
+}
+
 // §7.2 phase 1 (AI-assisted, DKGL_TODO #14): jak2 renderer set, mirroring
 // OpenGLRenderer::init_bucket_renderers_jak2 bucket for bucket. Everything the existing
 // dkgl program table can already run: ocean 6/310, the 40 Merc2 buckets (merc2 program; the
@@ -1661,11 +2190,190 @@ bool init_jak2(TexturePool* pool, Loader* loader, int loaded) {
   return init_jak2_foreground(pool, loaded);
 }
 
+// J2 (AI-assisted, jak3 bringup): the jak3 renderer set, mirroring
+// OpenGLRenderer::init_bucket_renderers_jak3 bucket for bucket
+// (docs/deko3d/jak3-bucket-census.md). Structure = init_jak2: the sorted id table
+// here, the renderers the dkgl program table already runs, then the foreground half.
+// Not dispatched by dk_renderer until J4 adds the Jak3 arm -- until then this is
+// unreachable at runtime, like every dkgl init failure path leaves active() false.
+bool init_jak3(TexturePool* pool, Loader* loader, int loaded) {
+  // kJak3Buckets + the eye-capable tex ids + the per-level merc/generic/tfrag-water
+  // rows + the tie ids, sorted: capture_until walks ids in order. All per-level ids
+  // come from the L0/L1 enum pair (GET_BUCKET_ID_FOR_LIST), so the arithmetic cannot
+  // drift from init_bucket_renderers_jak3.
+  {
+    auto lvl = [](jak3::BucketId a, jak3::BucketId b, int i) {
+      return (int)a + ((int)b - (int)a) * i;
+    };
+    int n = 0;
+    for (int i = 0; i < kJak3Count; i++) {
+      s_jak3_ids[n++] = kJak3Buckets[i];
+    }
+    for (int l = 0; l < 10; l++) {
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_TFRAG, jak3::BucketId::TEX_L1_TFRAG, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_SHRUB, jak3::BucketId::TEX_L1_SHRUB, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_ALPHA, jak3::BucketId::TEX_L1_ALPHA, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_PRIS, jak3::BucketId::TEX_L1_PRIS, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_PRIS2, jak3::BucketId::TEX_L1_PRIS2, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TEX_L0_WATER, jak3::BucketId::TEX_L1_WATER, l);
+    }
+    for (auto b : {jak3::BucketId::TEX_LCOM_TFRAG, jak3::BucketId::TEX_LCOM_SHRUB,
+                   jak3::BucketId::TEX_LCOM_PRIS, jak3::BucketId::TEX_LCOM_WATER}) {
+      s_jak3_ids[n++] = (int)b;
+    }
+    for (auto b : {jak3::BucketId::TEX_LCOM_SKY_PRE, jak3::BucketId::TEX_LCOM_SKY_POST,
+                   jak3::BucketId::TEX_SPRITE, jak3::BucketId::TEX_WARP,
+                   jak3::BucketId::TEX_HUD_HUD_ALPHA, jak3::BucketId::TEX_HUD_PRIS2}) {
+      s_jak3_ids[n++] = (int)b;
+    }
+    // the 16 per-level merc/generic rows + the water tfrag (census §3)
+    for (int l = 0; l < 10; l++) {
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_TFRAG, jak3::BucketId::MERC_L1_TFRAG, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_TFRAG, jak3::BucketId::GMERC_L1_TFRAG, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_SHRUB, jak3::BucketId::MERC_L1_SHRUB, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_SHRUB, jak3::BucketId::GMERC_L1_SHRUB, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_ALPHA, jak3::BucketId::MERC_L1_ALPHA, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_ALPHA, jak3::BucketId::GMERC_L1_ALPHA, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_PRIS, jak3::BucketId::MERC_L1_PRIS, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_PRIS, jak3::BucketId::GMERC_L1_PRIS, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC2_L0_PRIS, jak3::BucketId::GMERC2_L1_PRIS, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_PRIS2, jak3::BucketId::MERC_L1_PRIS2, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_PRIS2, jak3::BucketId::GMERC_L1_PRIS2, l);
+      s_jak3_ids[n++] =
+          lvl(jak3::BucketId::GMERC2_L0_PRIS2, jak3::BucketId::GMERC2_L1_PRIS2, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::MERC_L0_WATER, jak3::BucketId::MERC_L1_WATER, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::GMERC_L0_WATER, jak3::BucketId::GMERC_L1_WATER, l);
+      s_jak3_ids[n++] =
+          lvl(jak3::BucketId::GMERC2_L0_WATER, jak3::BucketId::GMERC2_L1_WATER, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TFRAG_L0_WATER, jak3::BucketId::TFRAG_L1_WATER, l);
+    }
+    // §7.0 E pattern: the tie master + category ids (stride arithmetic like GL). Must
+    // match is_jak3_tie_bucket / init_jak3_foreground exactly -- the sorted walk is GL
+    // order.
+    for (int l = 0; l < 10; l++) {
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TIE_L0_TFRAG, jak3::BucketId::TIE_L1_TFRAG, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::ETIE_L0_TFRAG, jak3::BucketId::ETIE_L1_TFRAG, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TIE_L0_ALPHA, jak3::BucketId::TIE_L1_ALPHA, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::ETIE_L0_ALPHA, jak3::BucketId::ETIE_L1_ALPHA, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::TIE_L0_WATER, jak3::BucketId::TIE_L1_WATER, l);
+      s_jak3_ids[n++] = lvl(jak3::BucketId::ETIE_L0_WATER, jak3::BucketId::ETIE_L1_WATER, l);
+    }
+    if (n != kJak3TableMax) {  // census §3 guard
+      switch_run_logf("[dkgl] jak3 table size %d != census %d", n, kJak3TableMax);
+      return false;
+    }
+    std::sort(s_jak3_ids, s_jak3_ids + n);
+    s_bucket_ids = s_jak3_ids;
+    s_bucket_count = n;
+  }
+  std::shared_ptr<TexturePool> pool_ref(pool, [](TexturePool*) {});
+  std::shared_ptr<Loader> loader_ref(loader, [](Loader*) {});
+  s_srs = std::make_unique<SharedRenderState>(pool_ref, loader_ref, g_game_version);
+  // T125 pattern: the UNCHANGED GL TextureAnimator (jak3 defs: setup_texture_anims_
+  // jak3). Init runs after dk_loader_start loaded the GAME.fr3 common level, so the
+  // fixed-array anims find their textures. A/B flag: gk_dkgl_notexanim.txt.
+  if (!flag("gk_dkgl_notexanim.txt")) {
+    s_tex_anim = std::make_unique<TextureAnimator>(s_srs->shaders, s_common_level,
+                                                   g_game_version);
+    s_tex_anim_dummy = s_tex_anim->slots()->empty() ? 0 : s_tex_anim->slots()->front();
+  }
+  // T126 pattern: the UNCHANGED GL GlowRenderer. A/B flag: gk_dkgl_noglow.txt.
+  if (!flag("gk_dkgl_noglow.txt")) {
+    s_glow = std::make_unique<GlowRenderer>();
+  }
+  // GL jak3 registers DirectRenderer "sky" on bucket 5 (1024 * 8 vertices -- the jak2
+  // sky-draw pattern, bigger buffer) and "progress-hack" on bucket 7 (0x8000).
+  s_sky_draw = std::make_unique<DirectRenderer>("sky", (int)jak3::BucketId::SKY, 1024 * 8);
+  s_sky_draw->init_shaders(s_srs->shaders);
+  s_sky_draw->init_textures(*pool, GameVersion::Jak3);
+  s_renderers[list_index((int)jak3::BucketId::SKY)] = s_sky_draw.get();
+  s_progress_hack = std::make_unique<DirectRenderer>(
+      "progress-hack", (int)jak3::BucketId::PROGRESS_HACK, 0x8000);
+  s_progress_hack->init_shaders(s_srs->shaders);
+  s_progress_hack->init_textures(*pool, GameVersion::Jak3);
+  s_renderers[list_index((int)jak3::BucketId::PROGRESS_HACK)] = s_progress_hack.get();
+  s_mid_far =
+      std::make_unique<OceanMidAndFar>("ocean-mid-far", (int)jak3::BucketId::OCEAN_MID_FAR);
+  s_near = std::make_unique<OceanNear>("ocean-near", (int)jak3::BucketId::OCEAN_NEAR);
+  s_mid_far->init_shaders(s_srs->shaders);
+  s_near->init_shaders(s_srs->shaders);
+  s_mid_far->init_textures(*pool, GameVersion::Jak3);
+  s_near->init_textures(*pool, GameVersion::Jak3);
+  s_renderers[list_index((int)jak3::BucketId::OCEAN_MID_FAR)] = s_mid_far.get();
+  s_renderers[list_index((int)jak3::BucketId::OCEAN_NEAR)] = s_near.get();
+  // §7.2 phase-2 pattern: GL registers Shadow2 three times -- "shadow" on 350,
+  // "shadow2" on 572, "shadow3" on 573; the stencil resets in between. A/B flag:
+  // gk_dkgl_noshadow2.txt.
+  if (!flag("gk_dkgl_noshadow2.txt")) {
+    s_shadow2_a = std::make_unique<Shadow2>("shadow", (int)jak3::BucketId::SHADOW);
+    s_shadow2_a->init_shaders(s_srs->shaders);
+    s_renderers[list_index((int)jak3::BucketId::SHADOW)] = s_shadow2_a.get();
+    s_shadow2_b = std::make_unique<Shadow2>("shadow2", (int)jak3::BucketId::SHADOW2);
+    s_shadow2_b->init_shaders(s_srs->shaders);
+    s_renderers[list_index((int)jak3::BucketId::SHADOW2)] = s_shadow2_b.get();
+    s_shadow2_c = std::make_unique<Shadow2>("shadow3", (int)jak3::BucketId::SHADOW3);
+    s_shadow2_c->init_shaders(s_srs->shaders);
+    s_renderers[list_index((int)jak3::BucketId::SHADOW3)] = s_shadow2_c.get();
+    g_shadow2_darken_scale = flag("gk_dkgl_darkshadow.txt") ? 2.f : 1.f;
+  }
+  // §7.2 phase-2 pattern: the jak3 menus/HUD tail. GL registers ProgressRenderer on
+  // HUD_DRAW_HUD_ALPHA / HUD_DRAW_PRIS2 / BUCKET582, then DirectRenderers on DEBUG /
+  // DEBUG_NO_ZBUF2 / DEBUG_MENU. The debug trio reuses the jak2 members (one game per
+  // process). debug-no-zbuf1 keeps the jak2 318 pattern: uploads faked off, the native
+  // walk replays them (J3/J4 wire that walk). A/B flag: gk_dkgl_nomenu.txt.
+  if (!flag("gk_dkgl_nomenu.txt")) {
+    s_debug_no_zbuf1 = std::make_unique<TextureUploadHandler>(
+        "debug-no-zbuf1", (int)jak3::BucketId::DEBUG_NO_ZBUF1, nullptr, true);
+    s_debug_no_zbuf1->set_fake_uploads(true);
+    s_renderers[list_index((int)jak3::BucketId::DEBUG_NO_ZBUF1)] = s_debug_no_zbuf1.get();
+    s_hud_progress_a = std::make_unique<ProgressRenderer>(
+        "hud-draw-hud-alpha", (int)jak3::BucketId::HUD_DRAW_HUD_ALPHA, 0x8000);
+    s_hud_progress_a->init_shaders(s_srs->shaders);
+    s_hud_progress_a->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::HUD_DRAW_HUD_ALPHA)] = s_hud_progress_a.get();
+    s_hud_progress_b = std::make_unique<ProgressRenderer>(
+        "hud-draw-pris2", (int)jak3::BucketId::HUD_DRAW_PRIS2, 0x8000);
+    s_hud_progress_b->init_shaders(s_srs->shaders);
+    s_hud_progress_b->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::HUD_DRAW_PRIS2)] = s_hud_progress_b.get();
+    s_progress =
+        std::make_unique<ProgressRenderer>("progress", (int)jak3::BucketId::BUCKET582, 0x8000);
+    s_progress->init_shaders(s_srs->shaders);
+    s_progress->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::BUCKET582)] = s_progress.get();
+    s_debug2 = std::make_unique<DirectRenderer>("debug", (int)jak3::BucketId::DEBUG, 0x8000);
+    s_debug2->init_shaders(s_srs->shaders);
+    s_debug2->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::DEBUG)] = s_debug2.get();
+    s_debug_no_zbuf2 = std::make_unique<DirectRenderer>(
+        "debug-no-zbuf2", (int)jak3::BucketId::DEBUG_NO_ZBUF2, 0x8000);
+    s_debug_no_zbuf2->init_shaders(s_srs->shaders);
+    s_debug_no_zbuf2->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::DEBUG_NO_ZBUF2)] = s_debug_no_zbuf2.get();
+    s_debug3 = std::make_unique<DirectRenderer>("debug-menu", (int)jak3::BucketId::DEBUG_MENU,
+                                                0x8000);
+    s_debug3->init_shaders(s_srs->shaders);
+    s_debug3->init_textures(*pool, GameVersion::Jak3);
+    s_renderers[list_index((int)jak3::BucketId::DEBUG_MENU)] = s_debug3.get();
+  }
+  return init_jak3_foreground(pool, loaded);
+}
+
+namespace {
+// FIX 124 (AI-assisted): dkgl bind seam -> TexturePool draw stamp (see
+// dkgl_state.h). dk_renderer owns the pool and it outlives dkgl.
+TexturePool* s_stamp_pool = nullptr;
+void pool_draw_stamp(u64 gpu_id) {
+  s_stamp_pool->note_draw_id(gpu_id);
+}
+}  // namespace
+
 bool init(TexturePool* pool, Loader* loader) {
   if (s_active) {
     return true;
   }
-  if (g_game_version != GameVersion::Jak1 && g_game_version != GameVersion::Jak2) {
+  if (g_game_version != GameVersion::Jak1 && g_game_version != GameVersion::Jak2 &&
+      g_game_version != GameVersion::Jak3) {
     return false;
   }
   if (flag("gk_dkocean_native.txt")) {
@@ -1712,7 +2420,9 @@ bool init(TexturePool* pool, Loader* loader) {
 
   u32 code_off = 0;
   int loaded = 0;
-  if (g_game_version == GameVersion::Jak2) {
+  if (g_game_version != GameVersion::Jak1) {
+    // J2: the y-scale vert blobs are shared jak2/jak3 (only jak1 differs), so the
+    // swap runs for every non-jak1 game.
     use_jak2_verts();
   }
   for (auto& p : s_programs) {
@@ -1735,6 +2445,11 @@ bool init(TexturePool* pool, Loader* loader) {
   force_program_inert(s_merc_native ? "merc2" : nullptr);
   set_emitter(&s_emitter);
   set_external_buffer_lookup(loader_buffer);
+  // FIX 124 (AI-assisted): dkgl binds raw pool ids with no tbp lookup; give
+  // the pool a stamp hook so recently drawn pages defer their unload
+  // (black-wall / white-box-Jak guard, see the TexturePool.h FIX 124 block).
+  s_stamp_pool = pool;
+  set_pool_draw_stamp_hook(&pool_draw_stamp);
   frame_end();
   // dk_renderer owns the pool and loader (unique_ptr); SharedRenderState wants shared_ptr.
   if (g_game_version == GameVersion::Jak2) {
@@ -1742,6 +2457,17 @@ bool init(TexturePool* pool, Loader* loader) {
     // glad overrides) is game-agnostic. A failure here leaves active() false, so the caller
     // keeps running without dkgl world passes (same contract as the jak1 ocean fallback).
     if (!init_jak2(pool, loader, loaded)) {
+      return false;
+    }
+    s_active = true;
+    return true;
+  }
+  if (g_game_version == GameVersion::Jak3) {
+    // J2 (AI-assisted, jak3 bringup): the jak3 renderer set -- same contract as the
+    // jak2 arm above. dk_renderer.cpp only calls dkgl::init from its Jak1/Jak2
+    // branches today, so this is unreachable until J4 adds the Jak3 dispatch +
+    // record path; landing it early keeps the bucket table testable on PC builds.
+    if (!init_jak3(pool, loader, loaded)) {
       return false;
     }
     s_active = true;
@@ -1889,7 +2615,10 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
   // default-regs chain, so the bucket table starts at the chain offset itself. The old
   // CALL-only check made every jak2 capture_begin return false: black screen, zero draws,
   // no [dkgl] census, while the engine and loader ran fine (see gk_run_log 2026-10-31).
-  const bool head_call = g_game_version != GameVersion::Jak2;
+  // J4 (jak3): dispatch_buckets_jak3 reads the SAME "starts at 0 in jak 2" line (both
+  // gen-2 chains have no CALL head), so the head check is jak1-only -- `!= Jak2` would
+  // have rejected every jak3 capture with the exact 2026-10-31 failure mode.
+  const bool head_call = g_game_version == GameVersion::Jak1;
   DmaFollower d(chain_data, chain_offset);
   if (head_call && d.current_tag().kind != DmaTag::Kind::CALL) {
     return false;
@@ -2414,11 +3143,16 @@ void capture_end() {
         "[dkgl] ocean %llu frames | segs %u+%u | data %u/%u KB ubo %u/%u KB high | fails "
         "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
-        "bad %llu | distort %llu bad %llu",
+        "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
-        (unsigned)s_lists[list_index(g_game_version == GameVersion::Jak2
-                                         ? (int)jak2::BucketId::OCEAN_NEAR
-                                         : 63)].segs.size(), s_data[s_slot].high / 1024, kDataBytes / 1024,
+        (unsigned)s_lists[std::max(
+             0,
+             list_index(g_game_version == GameVersion::Jak1
+                            ? 63
+                            : g_game_version == GameVersion::Jak2
+                                  ? (int)jak2::BucketId::OCEAN_NEAR
+                                  : (int)jak3::BucketId::OCEAN_NEAR))]
+            .segs.size(), s_data[s_slot].high / 1024, kDataBytes / 1024,
         s_ubo[s_slot].high / 1024, kUboBytes / 1024, s_data[s_slot].fails, s_ubo[s_slot].fails,
         (unsigned long long)draw_count(), (unsigned long long)skipped_draw_count(),
         (unsigned long long)inert_draw_count(), (unsigned long long)no_texture_draw_count(),
@@ -2430,7 +3164,8 @@ void capture_end() {
         (unsigned long long)s_eye_draws, (unsigned long long)s_interleaved_frames,
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
         (unsigned long long)s_glow_bad, (unsigned long long)s_distort_draws,
-        (unsigned long long)s_distort_bad);
+        (unsigned long long)s_distort_bad, (unsigned long long)s_sky_halfres_frames,
+        (unsigned long long)s_sky_halfres_fail);
     // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
     // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
     // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData
@@ -2655,13 +3390,20 @@ bool record_bucket(int bucket) {
             h = nh;
           }
         } else {
-          DkImageView dst;
-          dkImageViewDefaults(&dst, img);
           const u32 flags = seg.blit_linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest;
-          if (seg.blit_prev) {
-            dkdev::blit_prev_frame_to(&dst, &seg.blit_src, &seg.blit_dst, flags);
+          if (seg.blit_to_frame) {
+            // §7.2 half-res sky (AI-assisted): image -> frame colour target (the composite)
+            DkImageView src;
+            dkImageViewDefaults(&src, img);
+            dkdev::blit_to_frame(&src, &seg.blit_src, &seg.blit_dst, flags);
           } else {
-            dkdev::blit_frame_to(&dst, &seg.blit_src, &seg.blit_dst, flags);
+            DkImageView dst;
+            dkImageViewDefaults(&dst, img);
+            if (seg.blit_prev) {
+              dkdev::blit_prev_frame_to(&dst, &seg.blit_src, &seg.blit_dst, flags);
+            } else {
+              dkdev::blit_frame_to(&dst, &seg.blit_src, &seg.blit_dst, flags);
+            }
           }
         }
       }
@@ -2685,13 +3427,36 @@ bool record_bucket(int bucket) {
       eye_probe(cb);
     }
   }
-  dkCmdBufSignalFence(cb, &s_fence[s_slot], false);
-  s_fence_armed[s_slot] = true;
+  // J7 (AI-assisted): do NOT signal the slot fence here, once per bucket. Every
+  // signalFence ctrl command splits the frame's GPU stream into its own host-gpfifo
+  // entry AND makes the queue emit a syncpt/semaphore command burst (dk_queue.cpp
+  // Queue::signalFence) -- at ~587 buckets on a heavy jak3 frame that alone was a
+  // large fraction of the 0x800-entry kernel gpfifo ring, and the direct trigger of
+  // the 0xd5c (nv InsufficientMemory) kickoff spam + hitching. The fence is only ever
+  // waited on at capture_begin, 3 captures later, for its FINAL value: one signal
+  // after the last bucket of the frame (record_frame_fence) is semantically
+  // identical -- it completes only when the whole frame's lists are done.
+  s_frame_lists_called = true;
   return true;
 }
 
 bool record_blackout() {
   return record_bucket(kBlackoutList);
+}
+
+// J7 (AI-assisted): the frame's single slot-fence signal, replacing the per-bucket one
+// (see record_bucket). The world recorders call this after their LAST dkgl record call
+// (dk_renderer.cpp record_tfrag_and_shrub / record_gen2_dkgl); every record_bucket call
+// site lives inside one of those two functions. Skips frames where no list was called:
+// nothing of this slot is in flight, and arming the fence without a signal would make
+// capture_begin wait for a stale value three frames later.
+void record_frame_fence() {
+  if (!s_active || !s_frame_lists_called) {
+    return;
+  }
+  s_frame_lists_called = false;
+  dkCmdBufSignalFence(dkdev::cmd_handle(), &s_fence[s_slot], false);
+  s_fence_armed[s_slot] = true;
 }
 
 }  // namespace dkgl
@@ -2753,6 +3518,7 @@ bool record_distort() {
 bool record_blackout() {
   return false;
 }
+void record_frame_fence() {}
 void set_pmode_alp(float) {}
 void set_frame_size(int, int) {}
 }  // namespace dkgl

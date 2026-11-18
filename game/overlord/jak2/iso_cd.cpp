@@ -6,6 +6,7 @@
 #include "common/log/log.h"
 #include "common/util/Assert.h"
 #include "common/util/FileUtil.h"
+#include "common/util/FsLock.h"
 
 #include "game/common/overlord_common.h"
 #include "game/overlord/common/fake_iso.h"
@@ -143,6 +144,17 @@ int sceCdRead(int lsn, int num_sectors, void* dest, void* mode) {
   auto do_read = [lsn, num_sectors, dest](s32 thid) {
     // printf("sceCdRead %d, %d -> %p\n", lsn, num_sectors, dest);
     ASSERT(gFakeCd.fp);
+    // FIX 118 (AI-assisted): every fake-CD fread/fseek must hold SWITCH_FS_LOCK.
+    // The jak2 overlord streams DGOs and VO pages through this FILE* on the
+    // overlord/thpool threads with no lock, while the loader thread reads level
+    // fr3 files and the GOAL kernel reads streams through the same fsdev layer.
+    // newlib's devoptab (descriptor table, fsp-srv session) is unsynchronized,
+    // so two unlocked/locked mixes corrupt in-flight reads: the loader's fr3
+    // buffer comes back with garbage bytes and the one-shot zstd decompressor
+    // dies on "Src size is incorrect" (the recurring mission-blackout crash,
+    // both symbolized stacks). jak1's fake_iso.cpp got this lock long ago;
+    // jak2's iso_cd.cpp was simply missed.
+    SWITCH_FS_LOCK();
     if (fseek(gFakeCd.fp, lsn * SECTOR_SIZE, SEEK_SET)) {
       ASSERT_MSG(false, "Failed to fseek");
     }
@@ -213,6 +225,11 @@ static void read_remaining_pages_inline() {
     }
     ReadPagesCurrentSector = ReadPagesCurrentSector + ReadPagesSectorsPerPage;
     ReadPagesCurrentBuffer = ReadPagesCurrentPage->buffer;
+    // FIX 118 (AI-assisted): page-run freads race every other locked fsdev user
+    // (loader fr3 reads, GOAL kernel streams) without the lock -- see the FIX 118
+    // note in sceCdRead above. Taken per page so the loader/kernel can interleave
+    // between pages instead of waiting for the whole run.
+    SWITCH_FS_LOCK();
     if (fread(ReadPagesCurrentBuffer, ReadPagesSectorsPerPage * SECTOR_SIZE, 1, gFakeCd.fp) < 0) {
       printf("dest is %p, num_sectors %d, lsn %d\n", ReadPagesCurrentBuffer,
              ReadPagesSectorsPerPage, ReadPagesCurrentSector);
@@ -681,6 +698,9 @@ int FS_PageBeginRead(LoadStackEntry* lse, Buffer* buffer) {
       ASSERT(fp);
 
       if (gFakeCd.fp) {
+        // FIX 118 (AI-assisted): fclose goes through the same unsynchronized
+        // devoptab descriptor table -- lock it like every other fsdev entry.
+        SWITCH_FS_LOCK();
         fclose(gFakeCd.fp);
       }
       gFakeCd.fp = fp;

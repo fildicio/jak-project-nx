@@ -476,6 +476,26 @@
     )
   )
 
+;; Switch port (AI-assisted): read-only resolution readout for the debug (OpenGOAL)
+;; menu's PC Settings page, matching the Graphics-menu readout in
+;; progress-static-pc.gc. The console output size is fixed by the swapchain
+;; (720p handheld / 1080p docked) and can't be changed from the menu, so the func
+;; ignores press/adjust messages and always returns the live value reported by
+;; pc-get-window-size (the size the SDL window / swapchain was created with).
+;; id 0 = width, 1 = height, encoded like dm-lod-int (arg0 arrives tagged *8).
+;; GOTCHA (progress-static-pc.gc): the 'static boxed-array is written at RUNTIME
+;; every call -- never constant-fold its contents into anything.
+(define *dm-resolution-readout* (new 'static 'boxed-array :type int64 0 0))
+
+(defun dm-resolution-readout-func ((arg0 int) (arg1 debug-menu-msg) (arg2 int) (arg3 int))
+  (pc-get-window-size (&-> *dm-resolution-readout* 0) (&-> *dm-resolution-readout* 1))
+  (case (/ arg0 8)
+    ((0) (the int (-> *dm-resolution-readout* 0)))
+    ((1) (the int (-> *dm-resolution-readout* 1)))
+    (else arg3)
+    )
+  )
+
 (defun dm-subtitle-setting ((setting symbol) (msg debug-menu-msg))
   (when (= msg (debug-menu-msg press))
     (set! (-> *pc-settings* subtitle-speaker?) setting))
@@ -841,6 +861,13 @@
             (function "Fullscreen" #f ,(lambda () (pc-set-display-mode! 'fullscreen 0 0)))
             (function "Borderless" #f ,(lambda () (pc-set-display-mode! 'borderless 0 0)))
             )
+          ;; Switch port (AI-assisted): live read-only resolution readout (width /
+          ;; height of the real output) above the size pickers. On the console these
+          ;; cannot be changed -- dm-resolution-readout-func ignores every write
+          ;; attempt. On PC they show the current window size in pixels.
+          (int-var "Resolution W" 0 dm-resolution-readout-func 20 1 #t 1 8192)
+          (int-var "Resolution H" 1 dm-resolution-readout-func 20 1 #t 1 8192)
+
          (menu "Sizes"
             (function "640 x 480" (640 480) dm-size-pick-func)
             (function "640 x 360" (640 360) dm-size-pick-func)

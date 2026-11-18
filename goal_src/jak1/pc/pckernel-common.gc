@@ -97,6 +97,22 @@
   "Update settings from the C kernel to GOAL."
   (pc-get-window-size (&-> obj framebuffer-width) (&-> obj framebuffer-height))
   (pc-get-window-scale (&-> obj dpi-x) (&-> obj dpi-y))
+  ;; Switch port (AI-assisted): the console output is fixed 16:9 -- 720p handheld /
+  ;; 1080p docked, one display, no window, no user-selectable resolution. A settings
+  ;; file saved on a PC (or by an older build) can carry 4:3 / custom / vis aspect
+  ;; state and a stale game-size, which pillarboxes or squashes the image. Ignore all
+  ;; of it: always render the full 16:9 framebuffer and report the display size as the
+  ;; game size. This runs every frame (update -> update-from-os), so it also overrides
+  ;; anything a menu might try to save mid-run. (This file is compiled into all three
+  ;; games -- see each game's project-lib.gp.)
+  (when (= (pc-get-os) 'switch)
+    (false! (-> obj use-vis?))
+    (false! (-> obj aspect-ratio-auto?))
+    (set! (-> obj aspect-custom-x) 16)
+    (set! (-> obj aspect-custom-y) 9)
+    (set-aspect-ratio! obj ASPECT_16X9)
+    (set! (-> obj width) (-> obj framebuffer-width))
+    (set! (-> obj height) (-> obj framebuffer-height)))
   (when (-> obj use-vis?)
     (if (= (get-game-setting obj 'aspect-ratio) 'aspect4x3)
       (set-aspect-ratio! obj ASPECT_4X3)

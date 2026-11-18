@@ -38,6 +38,14 @@ class Loader {
 
   BankHandle BankLoad(std::span<u8> bank);
 
+  // FIX 121 (AI-assisted): BankLoad used to parse the whole bank (multi-MB sample memcpy +
+  // grain parse) in one go, which Player::LoadBank ran under mTickLock -- the audio
+  // callback's lock, whose ~21 ms deadline those parses blew on every district bank swap.
+  // Split it: ParseBank touches no shared state and runs unlocked (mBanks is GOAL-thread
+  // only; the audio Tick never reads it), AddBank is the cheap locked insert.
+  std::unique_ptr<SoundBank> ParseBank(std::span<u8> bank);
+  BankHandle AddBank(std::unique_ptr<SoundBank> bank);
+
  private:
   std::vector<std::unique_ptr<SoundBank>> mBanks;
 };

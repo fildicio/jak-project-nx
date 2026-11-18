@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "sfxblock.h"
+#include "blocksound_handler.h"  // FIX 121: instance-limit pre-check reads BlockSoundHandler state
 
 #include "fmt/format.h"
 
@@ -35,6 +36,24 @@ namespace {
 int s_aud_plays = 0, s_aud_nobank = 0, s_aud_nohandler = 0, s_aud_limit = 0;
 // per sound: [0] new play rejected by the instance limit, [1] older instance stopped for it
 std::map<std::pair<SoundBank*, u32>, std::array<int, 2>> s_aud_limited;
+// FIX 122 (AI-assisted): handlers that finished less than 24 ticks (~0.1 s at 240 Hz)
+// after starting. A sound that dies at birth gets re-fired by GOAL every frame -- the
+// ctywid retrigger storm measured 2026-11-18 runs one sound at up to 220 plays/s while
+// "live" stays at 0-8, and it starves the instance limit so real one-shots (gunshots)
+// get dropped. Naming the sound needs a reverse lookup in the bank's (small) name table.
+int s_aud_instant = 0;
+std::map<std::pair<SoundBank*, u32>, int> s_aud_instant_map;
+const char* aud_sound_name(SoundBank* bank, u32 sound_id) {
+  auto* block = dynamic_cast<SFXBlock*>(bank);
+  if (block) {
+    for (const auto& [name, id] : block->Names) {
+      if (id == sound_id) {
+        return name.c_str();
+      }
+    }
+  }
+  return "?";
+}
 void aud_report_top(int which, const char* what) {
   const std::pair<SoundBank*, u32>* best = nullptr;
   int n = 0;
@@ -46,8 +65,32 @@ void aud_report_top(int which, const char* what) {
   }
   if (best) {
     auto name = best->first->GetName();
-    switch_run_logf("[aud]   top %s: bank %.*s sound %u x%d", what,
-                    name ? (int)name->size() : 1, name ? name->data() : "?", best->second, n);
+    switch_run_logf("[aud]   top %s: bank %.*s sound %u (%s) x%d", what,
+                    name ? (int)name->size() : 1, name ? name->data() : "?", best->second,
+                    aud_sound_name(best->first, best->second), n);
+  }
+}
+void aud_report_top_instant() {
+  // FIX 123 (AI-assisted): top-3, not top-1 -- the f122 log showed several distinct
+  // instant-death populations (steam vent, footsteps, ambients) and one line hid all
+  // but the biggest.
+  for (int rank = 0; rank < 3; rank++) {
+    const std::pair<SoundBank*, u32>* best = nullptr;
+    int n = 0;
+    for (auto& [k, v] : s_aud_instant_map) {
+      if (v > n) {
+        n = v;
+        best = &k;
+      }
+    }
+    if (!best || n == 0) {
+      break;
+    }
+    auto name = best->first->GetName();
+    switch_run_logf("[aud]   top%d instant-death: bank %.*s sound %u (%s) x%d", rank + 1,
+                    name ? (int)name->size() : 1, name ? name->data() : "?", best->second,
+                    aud_sound_name(best->first, best->second), n);
+    s_aud_instant_map.erase(*best);
   }
 }
 }  // namespace
@@ -163,6 +206,37 @@ void Player::Tick(s16Output* stream, int samples) {
       for (auto it = mHandlers.begin(); it != mHandlers.end();) {
         bool done = it->second->Tick();
         if (done) {
+#ifdef __SWITCH__
+          // FIX 122 (AI-assisted): instant-death probe. Runs only when a handler
+          // finishes (a few times per second), never on the hot path.
+          if (auto* bh = dynamic_cast<BlockSoundHandler*>(it->second.get())) {
+            if (mTick - bh->m_start_tick < 24) {
+              s_aud_instant++;
+              s_aud_instant_map[{&bh->Bank(), bh->m_sound_id}]++;
+              // FIX 123 (AI-assisted): two full snapshots per sound, then aggregates
+              // only. last= is the grain type that ran last (STOP = the sound program
+              // branched to its stop grain; a sample/cull decision made by the bank
+              // data, not by us), next=/grains= show whether the grain list was
+              // burned through with zero delays, voice= whether a VAG voice ever
+              // started. vol fields separate "played at ~0 volume" from the rest.
+              static std::map<std::pair<SoundBank*, u32>, int> s_aud_detail_n;
+              if (++s_aud_detail_n[{&bh->Bank(), bh->m_sound_id}] <= 2) {
+                auto bank_name = bh->Bank().GetName();
+                switch_run_logf(
+                    "[aud] instant %.*s#%u (%s): ticks=%d grains=%u next=%u last=%d "
+                    "voice=%d paused=%d appvol=%d curvol=%d pan=%d countdown=%d "
+                    "reg=%d,%d,%d,%d",
+                    bank_name ? (int)bank_name->size() : 1, bank_name ? bank_name->data() : "?",
+                    bh->m_sound_id, aud_sound_name(&bh->Bank(), bh->m_sound_id),
+                    mTick - bh->m_start_tick, (unsigned)bh->m_sfx->Grains.size(),
+                    bh->m_next_grain, bh->m_last_grain_type, (int)bh->m_had_voice,
+                    (int)bh->m_paused, bh->m_app_volume, bh->m_cur_volume, bh->m_cur_pan,
+                    bh->m_countdown, bh->m_registers[0], bh->m_registers[1],
+                    bh->m_registers[2], bh->m_registers[3]);
+              }
+            }
+          }
+#endif
           // fmt::print("erasing handler\n");
           mHandleAllocator.FreeId(it->first);
           it = mHandlers.erase(it);
@@ -181,13 +255,15 @@ void Player::Tick(s16Output* stream, int samples) {
       static int s_secs = 0;
       if (++s_secs == 10) {
         s_secs = 0;
-        switch_run_logf("[aud] 10s plays %d nobank %d nohandler %d limit %d | live %d",
-                        s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit,
+        switch_run_logf("[aud] 10s plays %d nobank %d nohandler %d limit %d instant %d | live %d",
+                        s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit, s_aud_instant,
                         (int)mHandlers.size());
         aud_report_top(0, "rejected");
         aud_report_top(1, "cut-off");
+        aud_report_top_instant();
         s_aud_limited.clear();
-        s_aud_plays = s_aud_nobank = s_aud_nohandler = s_aud_limit = 0;
+        s_aud_instant_map.clear();
+        s_aud_plays = s_aud_nobank = s_aud_nohandler = s_aud_limit = s_aud_instant = 0;
       }
 #endif
     }
@@ -213,6 +289,49 @@ u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm
   }
 
   u32 handle = mHandleAllocator.GetId();
+
+  // FIX 121 (AI-assisted): instance-limit pre-check, before MakeHandler. GOAL retriggers
+  // limited sounds at up to hundreds of plays per second (one hardware window measured 4190
+  // plays / 4019 rejected), and the old order built a full BlockSoundHandler first -- its
+  // constructor even executes immediate grains (voice allocation, blocksound_handler.cpp
+  // 104-108) -- just for CheckInstanceLimit to discard it a moment later. All of that ran
+  // under mTickLock, which the ~21 ms SDL audio callback also needs; the callback falling
+  // behind is what desynced the 240 Hz sound clock from the frame clock (up to +0.7 s per
+  // 10 s of busy gameplay, measured between the [aud] 10s lines in gk_run_log.txt). This
+  // replicates BlockSoundHandler::CheckInstanceLimit's reject decision without constructing
+  // anything: a doomed play now costs one cheap map scan instead of a handler build+destroy
+  // under the audio lock. The steal branch (tick/vol flags) still goes through the original
+  // MakeHandler + CheckInstanceLimit path, unchanged.
+  if (auto* block = dynamic_cast<SFXBlock*>(bank)) {
+    if (sound_id < block->Sounds.size() && !block->Sounds[sound_id].Grains.empty()) {
+      const auto& def = block->Sounds[sound_id];
+      if (def.InstanceLimit && def.Flags.has_instlimit()) {
+        int inst = 0;
+        s32 min_app_volume = 0;  // valid as soon as inst > 0
+        for (const auto& [id, handler_ptr] : mHandlers) {
+          auto* handler = dynamic_cast<BlockSoundHandler*>(handler_ptr.get());
+          if (handler && (handler->m_orig_sfx == &def || handler->m_sfx == &def)) {
+            if (inst == 0 || handler->m_app_volume < min_app_volume) {
+              min_app_volume = handler->m_app_volume;
+            }
+            inst++;
+          }
+        }
+        // CheckInstanceLimit rejects the new play when inst >= limit and it may not steal:
+        // the tick flag always steals the oldest instead, and with the vol flag a louder
+        // new play still steals from the quietest existing one.
+        if (def.InstanceLimit - 1 < inst && !def.Flags.instlimit_tick() &&
+            (!def.Flags.instlimit_vol() || min_app_volume >= vol)) {
+#ifdef __SWITCH__
+          s_aud_limit++;
+          s_aud_limited[{bank, sound_id}][0]++;
+#endif
+          return 0;
+        }
+      }
+    }
+  }
+
   auto handler = bank->MakeHandler(mVmanager, sound_id, vol, pan, pm, pb, GetTick(), handle);
   if (!handler.has_value()) {
 #ifdef __SWITCH__
@@ -352,8 +471,20 @@ void Player::SetMasterVolume(u32 group, s32 volume) {
 }
 
 BankHandle Player::LoadBank(std::span<u8> bank) {
+  // FIX 121 (AI-assisted): parse the bank OUTSIDE mTickLock. The old scoped_lock wrapped
+  // Loader::BankLoad's whole multi-MB sample memcpy + grain parse, and GOAL swaps district
+  // banks constantly while roaming (see the [aud] bank unload lines); each swap held the
+  // audio callback's lock for far longer than its ~21 ms deadline -> underruns -> the 240 Hz
+  // sound clock fell behind the frame clock (the measured audio desync). mBanks is only ever
+  // touched from the GOAL thread -- the audio Tick never reads it -- so the parse needs no
+  // lock at all and only the cheap AddBank insert keeps one, for ordering with the other
+  // GOAL-side Player calls that hold it.
+  auto parsed = mLoader.ParseBank(bank);
+  if (!parsed) {
+    return nullptr;
+  }
   std::scoped_lock lock(mTickLock);
-  return mLoader.BankLoad(bank);
+  return mLoader.AddBank(std::move(parsed));
 }
 
 void Player::UnloadBank(BankHandle bank_handle) {
@@ -389,6 +520,7 @@ void Player::UnloadBank(BankHandle bank_handle) {
   }
 #ifdef __SWITCH__
   s_aud_limited.clear();  // its keys hold bank pointers
+  s_aud_instant_map.clear();  // FIX 122: same reason -- bank pointers in the keys
 #endif
 
   mLoader.UnloadBank(bank_handle);

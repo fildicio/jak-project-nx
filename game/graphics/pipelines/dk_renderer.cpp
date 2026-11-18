@@ -16,6 +16,7 @@
 #if defined(__SWITCH__)
 
 #include <algorithm>
+#include <array>  // J4: kJak3NativeSplits is a constexpr-built std::array
 #include <atomic>  // T49: s_dk_loader_ptr
 #include <chrono>
 #include <cstdio>
@@ -46,6 +47,10 @@
 #include "game/graphics/deko3d_renderer/SkyDk.h"           // T88: jak1 sky CPU blend
 #include "game/graphics/deko3d_renderer/dk_ocean_driver.h"  // T95: jak1 ocean
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_frame.h"  // T107: GL ocean through dkgl
+// FIX 121: dkgl_state.h declaration, kept local like TextureAnimator.cpp does.
+namespace dkgl {
+void set_int_attrib_draws(bool on);
+}
 #include "common/dma/dma_chain_read.h"  // T125: DmaFollower/VifCode (texture animator)
 #include "game/graphics/opengl_renderer/TextureAnimator.h"  // T125: handle_texture_anim_data
 #include "game/graphics/deko3d_renderer/EyeDk.h"           // T82: render-to-texture eyes
@@ -165,6 +170,24 @@ bool s_dk_jak2_world = false;
 // §7.2 particles (AI-assisted): SpriteDk reads + draws jak2 bucket 313 (GL "particles"
 // Sprite3, glow not ported). Opt-out: gk_nosprite.txt (same file as jak1).
 bool s_dk_jak2_sprite = false;
+// J4 (AI-assisted, jak3 bringup -- JAK3_BRINGUP_TODO J4): the jak3 twins of the three jak2
+// flags above. dkgl capture ON (init_jak3, J2); native tfrag/tie/shrub/hfrag world passes
+// split into record_jak3_dkgl; SpriteDk particles on bucket 570 (G1: native, like jak2).
+bool s_dk_jak3_dkgl = false;
+bool s_dk_jak3_world = false;
+bool s_dk_jak3_sprite = false;
+// J4: the gen-2 dkgl path is two games now. These pick the ACTIVE game's flags so the
+// capture / build / report sites below stay game-agnostic; the per-game parts (bucket
+// tables, hfrag) branch on g_game_version inside those blocks.
+bool dk_gen2_dkgl() {
+  return s_dk_jak2_dkgl || s_dk_jak3_dkgl;
+}
+bool dk_gen2_world() {
+  return (s_dk_jak2_dkgl && s_dk_jak2_world) || (s_dk_jak3_dkgl && s_dk_jak3_world);
+}
+bool dk_gen2_sprite() {
+  return (s_dk_jak2_dkgl && s_dk_jak2_sprite) || (s_dk_jak3_dkgl && s_dk_jak3_sprite);
+}
 // T72 (AI-assisted): OPT-IN shrub pass, gk_dkshrub.txt on top of gk_dktfrag.txt (jak1 only).
 bool s_dk_shrub = false;
 // T76 (AI-assisted): OPT-IN tie pass, gk_dktie.txt on top of gk_dktfrag.txt (jak1 only).
@@ -206,6 +229,23 @@ uint32_t dk_sprite_lookup(uint32_t tbp) {
   }
   GpuTexture* src = s_dk_tex_pool->lookup_gpu_texture(tbp);
   if (src == nullptr || src->is_placeholder) {
+    // AI-assisted (white-box probe, DKGL_TODO): a missed batch is SKIPPED by SpriteDk
+    // (no_tex counter), so a miss cannot draw anything itself -- but naming each miss
+    // tells us which page the game asked for at that moment. "placeholder" = a named
+    // texture whose data had not landed yet (the punch-spark suspect).
+    static uint32_t s_miss_logged = 0;
+    if (s_miss_logged < 40 || (s_miss_logged % 600) == 0) {
+      // FIX 123 (AI-assisted): pc= is the PcTextureId the slot was linked to by
+      // handle_upload_now (runtime tpage id / runtime tex index). Compare with the
+      // fr3 combo ids: gungame gen-02 is 2405/7, meta-01 2405/13; hiphog neon-on
+      // 998/64; baron-neon pages 1021/xx; ctyport signs 1325/xx. A mismatch here
+      // means the runtime tpage draws with a different id/index than the
+      // extraction assigned, so the loader's give never fills this entry.
+      switch_run_logf("[sprtex] MISS tbp=%u pc=%u/%u %s", tbp,
+                      src ? (unsigned)src->tex_id.page : 0, src ? (unsigned)src->tex_id.tex : 0,
+                      src ? s_dk_tex_pool->get_debug_texture_name(src->tex_id).c_str() : "no-page");
+    }
+    s_miss_logged++;
     return 0;
   }
   auto id = s_dk_tex_pool->lookup(tbp);
@@ -259,8 +299,19 @@ void dk_skip_texture_anim(DmaFollower& dma) {
 void dk_texture_anim(DmaFollower& dma, const void* ee_mem) {
   CapLap lap(kCapTexAnim);
   if (dkgl::tex_anim_begin()) {
+    // FIX 121 (AI-assisted): the jak2 animator composites -- the DMA DRAW path, the fixed
+    // anim arrays, clouds and slime -- all draw their quads with GL_INT vertex attribs,
+    // which dkgl skips unless allow-listed (dkgl_draw.cpp "outside the allow-list"). The
+    // missing allow-list HERE is why the composites used to come out empty and publishing
+    // was banned in TextureAnimator.cpp (black tickers / Krew sign / propaganda logo /
+    // animated damage textures ever since). The skull gem and clouds have run this exact
+    // way on hardware since f97fd4013; now the whole animator run is allow-listed, and the
+    // publish loop + fixed arrays are re-enabled behind the gk_dkgl_nodmatex.txt /
+    // gk_dkgl_noanim.txt kill switches there.
+    dkgl::set_int_attrib_draws(true);
     dkgl::texture_animator()->handle_texture_anim_data(dma, (const u8*)ee_mem,
                                                        s_dk_tex_pool.get(), g_dk->frame_idx);
+    dkgl::set_int_attrib_draws(false);
     dkgl::tex_anim_end();
   } else {
     dk_skip_texture_anim(dma);  // consume to FINISH_ARRAY; later uploads continue cleanly
@@ -516,15 +567,16 @@ void record_tfrag_and_shrub(int fb_w, int fb_h) {
     // GL do_pcrtc_effects: the pmode_alp fade to black goes over everything, HUD included
     dkgl::record_blackout();
   }
+  dkgl::record_frame_fence();  // J7: the frame's single slot-fence signal
 }
 
 // §7.2 phase 1 (AI-assisted): where the native world passes slot into the dkgl bucket
-// order. Bucket ids ascending = GL dispatch order (dispatch_buckets_jak2 walks ids), with
-// GL's GET_BUCKET_ID_FOR_LIST stride arithmetic so they cannot drift from
-// init_bucket_renderers_jak2. module: 0 = dktf, 1 = dkshrub, 2 = dktie; range = the
-// module's record_pass range (tfrag: pass index of kJak2Passes -- 0..5 NORMAL, 6..11
-// TRANS; tie: 2*pass + {0 normal/wind, 1 envmap}; shrub: pass index).
-struct Jak2NativeSplit {
+// order. Bucket ids ascending = GL dispatch order (dispatch_buckets_jak2/jak3 walk ids),
+// with GL's GET_BUCKET_ID_FOR_LIST stride arithmetic so they cannot drift from
+// init_bucket_renderers_jak2/jak3. module: 0 = dktf, 1 = dkshrub, 2 = dktie, 3 = dkhfrag
+// (J4); range = the module's record_pass range (tfrag: pass index of kJak2Passes /
+// kJak3Passes; tie: ranges_per_pass()*pass + category; shrub: pass index; hfrag: 0).
+struct Gen2NativeSplit {
   int bucket;
   uint8_t module;
   uint8_t range;
@@ -532,7 +584,7 @@ struct Jak2NativeSplit {
 constexpr int jak2_split_lvl(jak2::BucketId a, jak2::BucketId b, int i) {
   return (int)a + ((int)b - (int)a) * i;
 }
-constexpr Jak2NativeSplit kJak2NativeSplits[] = {
+constexpr Gen2NativeSplit kJak2NativeSplits[] = {
     // tfrag group: TFRAG_L{n} (native tfrag NORMAL), TIE_L{n} (tie normal + wind),
     // ETIE_L{n} (tie envmap) -- all before MERC_L{n}_TFRAG (dkgl merc2).
     {jak2_split_lvl(jak2::BucketId::TFRAG_L0_TFRAG, jak2::BucketId::TFRAG_L1_TFRAG, 0), 0, 0},
@@ -570,6 +622,67 @@ constexpr Jak2NativeSplit kJak2NativeSplits[] = {
 };
 constexpr int kJak2SplitCount =
     (int)(sizeof(kJak2NativeSplits) / sizeof(kJak2NativeSplits[0]));
+
+// J4 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md §2/§3): the jak3
+// native splits, 91 entries in ascending bucket order (= GL dispatch order):
+//   HFRAG 8 (dkhfrag, J3) · per level n=0..9 the TFRAG_L{n}_TFRAG + TIE/ETIE_L{n}_TFRAG
+//   trio (tfrag NORMAL range n, tie ranges 6n+0/6n+1) · SHRUB_L{n}_SHRUB (range n) ·
+//   per level the TFRAG_L{n}_ALPHA + TIE/ETIE_L{n}_ALPHA trio (tfrag TRANS range 10+n,
+//   tie 6n+2/6n+3) · per level TIE/ETIE_L{n}_WATER (tie 6n+4/6n+5). The water TFRAG
+//   buckets stay dkgl-captured (init_jak3, like jak2's tfrag-w), and PARTICLES 570 is
+//   driven by the record_sprite mechanism below, not a split. jak3's enum drops jak2's
+//   _T_/_W_ prefixes (TFRAG_L{n}_ALPHA, not TFRAG_T_L{n}_ALPHA).
+constexpr int jak3_split_lvl(jak3::BucketId a, jak3::BucketId b, int i) {
+  return (int)a + ((int)b - (int)a) * i;
+}
+constexpr int kJak3SplitCount = 91;  // 1 hfrag + 3*10 tfrag group + 10 shrub + 3*10 alpha + 2*10 water
+constexpr std::array<Gen2NativeSplit, kJak3SplitCount> build_jak3_splits() {
+  std::array<Gen2NativeSplit, kJak3SplitCount> t{};
+  int k = 0;
+  auto put = [&t, &k](int bucket, int module, int range) {
+    t[k++] = {bucket, (uint8_t)module, (uint8_t)range};
+  };
+  put((int)jak3::BucketId::HFRAG, 3, 0);
+  for (int n = 0; n < 10; n++) {  // tfrag group (ids 11..121, before MERC_L{n}_TFRAG)
+    put(jak3_split_lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, n),
+        0, n);
+    put(jak3_split_lvl(jak3::BucketId::TIE_L0_TFRAG, jak3::BucketId::TIE_L1_TFRAG, n), 2,
+        6 * n + 0);
+    put(jak3_split_lvl(jak3::BucketId::ETIE_L0_TFRAG, jak3::BucketId::ETIE_L1_TFRAG, n), 2,
+        6 * n + 1);
+  }
+  for (int n = 0; n < 10; n++) {  // shrub group (ids 131..221, before MERC_L{n}_SHRUB)
+    put(jak3_split_lvl(jak3::BucketId::SHRUB_L0_SHRUB, jak3::BucketId::SHRUB_L1_SHRUB, n),
+        1, n);
+  }
+  for (int n = 0; n < 10; n++) {  // alpha group (ids 231..332, before MERC_L{n}_ALPHA)
+    put(jak3_split_lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, n),
+        0, 10 + n);
+    put(jak3_split_lvl(jak3::BucketId::TIE_L0_ALPHA, jak3::BucketId::TIE_L1_ALPHA, n), 2,
+        6 * n + 2);
+    put(jak3_split_lvl(jak3::BucketId::ETIE_L0_ALPHA, jak3::BucketId::ETIE_L1_ALPHA, n), 2,
+        6 * n + 3);
+  }
+  for (int n = 0; n < 10; n++) {  // water ties (ids 467..558, before MERC_L{n}_WATER)
+    put(jak3_split_lvl(jak3::BucketId::TIE_L0_WATER, jak3::BucketId::TIE_L1_WATER, n), 2,
+        6 * n + 4);
+    put(jak3_split_lvl(jak3::BucketId::ETIE_L0_WATER, jak3::BucketId::ETIE_L1_WATER, n), 2,
+        6 * n + 5);
+  }
+  return t;
+}
+constexpr std::array<Gen2NativeSplit, kJak3SplitCount> kJak3NativeSplits =
+    build_jak3_splits();
+// Layout sentinels (a stray put() above shifts these and fails the build):
+static_assert(kJak3NativeSplits[0].bucket == 8 && kJak3NativeSplits[0].module == 3);
+static_assert(kJak3NativeSplits[1].bucket == 11 && kJak3NativeSplits[1].module == 0 &&
+              kJak3NativeSplits[1].range == 0);
+static_assert(kJak3NativeSplits[3].bucket == 13 && kJak3NativeSplits[3].module == 2 &&
+              kJak3NativeSplits[3].range == 1);
+static_assert(kJak3NativeSplits[31].bucket == 131 && kJak3NativeSplits[31].module == 1);
+static_assert(kJak3NativeSplits[41].bucket == 231 && kJak3NativeSplits[41].range == 10);
+static_assert(kJak3NativeSplits[71].bucket == 467 && kJak3NativeSplits[71].range == 4);
+static_assert(kJak3NativeSplits[90].bucket == 558 && kJak3NativeSplits[90].range == 59);
 
 // Opt-in GPU profiler (AI-assisted, DKGL_TODO 7.2 #8): sdmc:/switch/jak2/gk_gpuprof.txt puts
 // a timestamp before every unit record_jak2_dkgl records (each dkgl bucket, each native
@@ -623,13 +736,13 @@ static void prof_report() {
   char line[512];
   int pos = snprintf(line, sizeof(line), "[dk] gpu top ms/frame (%d frames, %d over 16.7) |",
                      s_prof_frames, s_prof_over);
-  static const char* kMod[3] = {"tf", "sh", "tie"};
+  static const char* kMod[4] = {"tf", "sh", "tie", "hf"};  // J4: module 3 = hfrag
   for (int i = 0; i < top && pos < (int)sizeof(line) - 24; i++) {
     const int k = order[i];
     const int l = s_prof_label[k];
     const double ms = s_prof_ms[k] / s_prof_frames;
     if (l >= 10000) {
-      pos += snprintf(line + pos, sizeof(line) - pos, " %s%d %.2f", kMod[((l - 10000) / 100) % 3],
+      pos += snprintf(line + pos, sizeof(line) - pos, " %s%d %.2f", kMod[((l - 10000) / 100) % 4],
                       (l - 10000) % 100, ms);
     } else {
       pos += snprintf(line + pos, sizeof(line) - pos, " b%d %.2f", l, ms);
@@ -643,12 +756,19 @@ static void prof_report() {
   s_prof_over = 0;
 }
 
-// §7.2 phase 1 (AI-assisted): jak2 world record -- every dkgl bucket in GL dispatch order
-// (dkgl's own table: sky 5, ocean 6/310, merc2/gmerc per group, effects 315, screen-filter
-// 321) with the native tfrag/tie/shrub passes split in at their GL bucket positions
-// (kJak2NativeSplits), then the pmode_alp blackout. Still dkgl-only/inert: shadow2, warp,
-// particles, tfrag WATER, alpha ties (phase 2/3).
-void record_jak2_dkgl(int fb_w, int fb_h) {
+// §7.2 phase 1 (AI-assisted) / J4 (jak3): the gen-2 world record -- every dkgl bucket in
+// GL dispatch order (dkgl's own sorted table) with the active game's native passes split
+// in at their GL bucket positions (kJak2NativeSplits / kJak3NativeSplits), then the
+// pmode_alp blackout. Shared by record_jak2_dkgl / record_jak3_dkgl; the sprite bucket
+// wraps the texanim (T125) / distort (T127) / glow (T126) side lists exactly like GL
+// Sprite3 draws them around its own bucket.
+void record_gen2_dkgl(const Gen2NativeSplit* splits,
+                      int split_count,
+                      bool world,
+                      bool sprite,
+                      int sprite_bucket,
+                      int fb_w,
+                      int fb_h) {
   // AI-assisted: record the staged tod-palette copies (and sky uploads) into THIS frame, like
   // record_tfrag_and_shrub does. Without it begin_deferred_frame() pushed them with a blocking
   // submit every frame (3-5 ms of CPU wait on jak2).
@@ -661,10 +781,9 @@ void record_jak2_dkgl(int fb_w, int fb_h) {
   int next_split = 0;
   auto flush_natives = [&](int before_bucket) {
     // every native whose bucket id comes before the next dkgl bucket records first
-    while (s_dk_jak2_world && next_split < kJak2SplitCount &&
-           kJak2NativeSplits[next_split].bucket < before_bucket) {
-      const Jak2NativeSplit& s = kJak2NativeSplits[next_split++];
-      prof_unit(unit, 10000 + std::min((int)s.module, 2) * 100 + s.range);
+    while (world && next_split < split_count && splits[next_split].bucket < before_bucket) {
+      const Gen2NativeSplit& s = splits[next_split++];
+      prof_unit(unit, 10000 + s.module * 100 + s.range);
       switch (s.module) {
         case 0:
           dktf::record_pass(s.range, fb_w, fb_h);
@@ -672,28 +791,31 @@ void record_jak2_dkgl(int fb_w, int fb_h) {
         case 1:
           dkshrub::record_pass(s.range, fb_w, fb_h);
           break;
+        case 3:
+          dkhfrag::record_world(fb_w, fb_h);  // J4: jak3 mountains (bucket 8, no range)
+          break;
         default:
           dktie::record_pass(s.range, fb_w, fb_h);
           break;
       }
     }
   };
-  // §7.2 particles: SpriteDk records at its GL slot, bucket 313 (after ocean-near 310, before
-  // shadow2 314 / effects 315 / screen-filter 321). dkgl re-binds its fixed state per bucket.
-  bool sprite_done = !s_dk_jak2_sprite;
+  // §7.2 particles: SpriteDk records at its GL slot (jak2 bucket 313, after ocean-near 310;
+  // jak3 bucket 570, before shadow2 572). dkgl re-binds its fixed state per bucket.
+  bool sprite_done = !sprite;
   auto record_sprite = [&]() {
-    flush_natives(dksprite::kJak2SpriteBucket);
-    prof_unit(unit, dksprite::kJak2SpriteBucket);
-    dkgl::record_tex_anim();  // T125: gem composites exist before bucket 313 samples them
+    flush_natives(sprite_bucket);
+    prof_unit(unit, sprite_bucket);
+    dkgl::record_tex_anim();  // T125: gem composites exist before the sprite bucket samples them
     dkgl::record_distort();   // T127: GL draws the distorter before the sprites (it samples
                               // the frame as it is BEFORE the sprite draws)
     dksprite::record_world(fb_w, fb_h);
-    dkgl::record_glow();  // T126: GL render_jak2 draws the glow right after the HUD sprites
+    dkgl::record_glow();  // T126: GL render_jak2/jak3 draws the glow right after the HUD sprites
     sprite_done = true;
   };
   for (int i = 0; i < dkgl::bucket_count(); ++i) {
     const int b = dkgl::bucket_at(i);
-    if (!sprite_done && b > dksprite::kJak2SpriteBucket) {
+    if (!sprite_done && b > sprite_bucket) {
       record_sprite();
     }
     flush_natives(b);
@@ -709,6 +831,20 @@ void record_jak2_dkgl(int fb_w, int fb_h) {
   }
   s_prof_units = unit;
   dkgl::record_blackout();
+  dkgl::record_frame_fence();  // J7: the frame's single slot-fence signal
+}
+
+void record_jak2_dkgl(int fb_w, int fb_h) {
+  record_gen2_dkgl(kJak2NativeSplits, kJak2SplitCount, s_dk_jak2_world, s_dk_jak2_sprite,
+                   dksprite::kJak2SpriteBucket, fb_w, fb_h);
+}
+
+// J4 (AI-assisted, jak3 bringup): the jak3 world record -- same walk as jak2 with the
+// jak3 split table (hfrag 8 + per level tfrag/tie/shrub/alpha/water groups, census §2/§3)
+// and the jak3 sprite bucket (PARTICLES 570).
+void record_jak3_dkgl(int fb_w, int fb_h) {
+  record_gen2_dkgl(kJak3NativeSplits.data(), kJak3SplitCount, s_dk_jak3_world,
+                   s_dk_jak3_sprite, dksprite::kJak3SpriteBucket, fb_w, fb_h);
 }
 
 bool dktfrag_present() {
@@ -720,6 +856,18 @@ void dk_loader_start() {
   // T51 breadcrumbs: the T49 run froze silently inside this function.
   switch_run_logf("[dk] dk-loader step 1/3: TexturePool (placeholder upload)");
   s_dk_tex_pool = std::make_unique<TexturePool>(g_game_version);
+  // FIX 124 (AI-assisted): draw-stamp eviction guard (PS2 semantics, see the
+  // TexturePool.h FIX 124 block): a page drawn within the window keeps its GPU
+  // id while its level unloads, and the unload retries once it goes idle.
+  // gk_dkgl_nopooldefer.txt turns it off (old behavior).
+  {
+    char defer_path[96];
+    snprintf(defer_path, sizeof(defer_path), "sdmc:/switch/%s/gk_dkgl_nopooldefer.txt",
+             game_version_names[g_game_version]);
+    const bool defer_on = access(defer_path, F_OK) != 0;
+    s_dk_tex_pool->set_defer_frames(defer_on ? 120 : 0);
+    switch_run_logf("[dk] pool defer unload %s", defer_on ? "ON (FIX124, 120 frames)" : "OFF (gk_dkgl_nopooldefer.txt)");
+  }
   const auto fr3 =
       file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] / "fr3";
   switch_run_logf("[dk] dk-loader step 2/3: Loader(%s)", fr3.string().c_str());
@@ -840,6 +988,42 @@ void dk_loader_start() {
                       s_gpu_prof ? "ON" : "off",
                       s_dk_jak2_sprite ? "ON" : "OFF (gk_nosprite.txt)");
     }
+  } else if (g_game_version == GameVersion::Jak3 && dktfrag_present()) {
+    // J4 (AI-assisted, jak3 bringup -- JAK3_BRINGUP_TODO J4): jak3 boots through dkgl
+    // capture like jak2 (init_jak3, J2 -- merc2/generic2/ocean/sky/shadow/warp/debug/HUD),
+    // with the native world passes (tfrag/tie/shrub/hfrag) and particles (SpriteDk, G1)
+    // split in at their GL bucket positions by record_jak3_dkgl. Opt-in like the jak2
+    // boot was: gk_dk3d.txt + gk_dkload.txt + gk_dktfrag.txt in sdmc:/switch/jak3/.
+    // The set_game picks install the jak3 tables (J3) BEFORE the first capture.
+    // MercDk/DirectDk stay unwired on jak3 (dkgl merc2/direct own those buckets, §7.1);
+    // their set_game keeps the default tables until they need jak3's own.
+    dktf::set_game(g_game_version);
+    dktie::set_game(g_game_version);
+    dkshrub::set_game(g_game_version);
+    dkhfrag::set_game(g_game_version);  // J3: bucket 8, no-CALL-head chain
+    dksprite::set_game(g_game_version);  // J3: flag&0x30 corner order
+    dkmerc::set_game(g_game_version);
+    dkdirect::set_game(g_game_version);
+    s_dk_jak3_dkgl = dkgl::init(s_dk_tex_pool.get(), s_dk_loader.get());
+    if (s_dk_jak3_dkgl) {
+      char path[96];
+      snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_dkgl_noworld.txt",
+               game_version_names[g_game_version]);
+      s_dk_jak3_world = access(path, F_OK) != 0;
+      snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_gpuprof.txt",
+               game_version_names[g_game_version]);
+      s_gpu_prof = access(path, F_OK) == 0;
+      snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_nosprite.txt",
+               game_version_names[g_game_version]);
+      s_dk_jak3_sprite = access(path, F_OK) != 0;  // record_world checks the shaders
+      dkdev::set_world_recorder(record_jak3_dkgl);
+      switch_run_logf("[dk] jak3 dkgl world ON (%d buckets, native world %s, gpu profiler %s, "
+                      "particles %s)",
+                      dkgl::bucket_count(),
+                      s_dk_jak3_world ? "ON" : "OFF (gk_dkgl_noworld.txt)",
+                      s_gpu_prof ? "ON" : "off",
+                      s_dk_jak3_sprite ? "ON" : "OFF (gk_nosprite.txt)");
+    }
   }
 }
 
@@ -850,6 +1034,9 @@ void dk_exit() {
   s_dk_jak2_dkgl = false;
   s_dk_jak2_world = false;
   s_dk_jak2_sprite = false;
+  s_dk_jak3_dkgl = false;
+  s_dk_jak3_world = false;
+  s_dk_jak3_sprite = false;
   s_dk_shrub = false;
   s_dk_tie = false;
   s_dk_hfrag = false;
@@ -1007,11 +1194,11 @@ void DkDisplay::render() {
     m_period.start();
     switch_run_logf("[dk] first render; gamepads seen by SDL: %d (no SDL video on this path)",
                     m_input_manager->get_num_controllers());
-    // T48 (AI-assisted, P2.3): bring up the 48 MB texture image pool HERE, on the render
-    // thread, so the T47 owner-thread guard records this thread as the only uploader.
+    // T48 (AI-assisted, P2.3): bring up the texture image pool (FIX 119: 256 MB) HERE, on
+    // the render thread, so the T47 owner-thread guard records this thread as the only uploader.
     const bool tex_ok = dktexgpu::init();
     switch_run_logf("[dk] tex pool init: %s",
-                    tex_ok ? "ok (96 MB image memblock, render thread owns uploads)"
+                    tex_ok ? "ok (256 MB image memblock, 4096 slots, render thread owns uploads)"
                            : "FAILED (telemetry stays 'tex -')");
     if (tex_ok && dkload_present()) {
       dk_loader_start();  // T49
@@ -1054,7 +1241,7 @@ void DkDisplay::render() {
     }
     std::unique_lock<std::mutex> lock(g_dk->dma_mutex);
     CapLap lap_drain(kCapDrain);
-    if (s_dk_jak2_dkgl && s_dk_jak2_world) {
+    if (dk_gen2_world()) {
       // AI-assisted: new deferred-copy staging slot BEFORE the capture stages this frame's
       // texture-anim / sky copies (they used to be flushed with a blocking submit when the
       // build called begin_deferred_frame later: 3-5 ms/frame). World recorder records them.
@@ -1134,15 +1321,21 @@ void DkDisplay::render() {
                              [](uint32_t tbp) { return dk_direct_lookup(tbp, false); });
       }
     }
-    if (s_dk_jak2_dkgl) {
-      // §7.2 phase 1 (AI-assisted): the natives read their buckets before the ack (same
-      // rule as the jak1 path above; tfrag first -- it captures the fog from the vis
-      // bucket that tie/shrub copy). THEN jak2 replays EVERY TextureUploadHandler bucket
-      // in GL order (the SpriteDk walker, sprite capture off) and runs the dkgl buckets
-      // inside that replay at their GL position, exactly like the jak1 interleave (#16/#19).
-      if (s_dk_jak2_world) {
+    if (dk_gen2_dkgl()) {
+      // §7.2 phase 1 (AI-assisted) / J4 (jak3): the natives read their buckets before the
+      // ack (same rule as the jak1 path above; tfrag first -- it captures the fog from the
+      // vis bucket that tie/shrub copy). THEN the gen-2 game replays EVERY
+      // TextureUploadHandler bucket in GL order (the SpriteDk walker, sprite capture off)
+      // and runs the dkgl buckets inside that replay at their GL position, exactly like
+      // the jak1 interleave (#16/#19). jak3 also reads the HFRAG bucket (J4: native
+      // mountains, T113/FIX 117's renderer) and walks its own upload list (J3 tables).
+      const bool jak3 = g_game_version == GameVersion::Jak3;
+      if (dk_gen2_world()) {
         CapLap lap(kCapWorld);
         dktf::capture_chain(g_dk->chain_data, g_dk->chain_offset);
+        if (jak3) {
+          dkhfrag::capture_chain(g_dk->chain_data, g_dk->chain_offset);  // J4: bucket 8
+        }
         dktie::capture_chain(g_dk->chain_data, g_dk->chain_offset);
         dkshrub::capture_chain(g_dk->chain_data, g_dk->chain_offset);
       }
@@ -1151,11 +1344,13 @@ void DkDisplay::render() {
       CapLap lap_walk(kCapWalk);
       s_dkgl_interleave = dkgl::capture_begin(g_dk->chain_data, g_dk->chain_offset);
       dksprite::capture_chain(g_dk->chain_data, g_dk->chain_offset, dk_sprite_upload,
-                              dk_sprite_lookup, dk_upload_bucket_hook, dksprite::kJak2TexBuckets,
-                              (int)(sizeof(dksprite::kJak2TexBuckets) / sizeof(int)),
-                              dksprite::kJak2SpriteBucket,
-                              s_dk_jak2_sprite,  // read_sprites: bucket 313 particles
-                              false,             // head_call: jak2 chains have no CALL head
+                              dk_sprite_lookup, dk_upload_bucket_hook,
+                              jak3 ? dksprite::kJak3TexBuckets : dksprite::kJak2TexBuckets,
+                              jak3 ? (int)(sizeof(dksprite::kJak3TexBuckets) / sizeof(int))
+                                   : (int)(sizeof(dksprite::kJak2TexBuckets) / sizeof(int)),
+                              jak3 ? dksprite::kJak3SpriteBucket : dksprite::kJak2SpriteBucket,
+                              dk_gen2_sprite(),  // read_sprites: particles bucket (313 / 570)
+                              false,  // head_call: jak2/jak3 chains have no CALL head
                               dk_texture_anim,  // T125: imm-12 -> GL TextureAnimator (dkgl)
                               dk_glow,          // T126: glow section -> GL GlowRenderer (dkgl)
                               dk_distort);      // T127: distort section -> GL distorter (dkgl)
@@ -1198,6 +1393,11 @@ void DkDisplay::render() {
     }
     m_focused = focused;
   }
+  // FIX 124 (AI-assisted): advance the pool's draw-stamp clock once per frame,
+  // before this frame's lookups/binds can write any stamps. s_dk_tex_pool is
+  // created in dk_loader_start() before the render loop begins (it is
+  // derefered by the loader update right below).
+  s_dk_tex_pool->tick_frame();
   if (s_dk_loader) {
     // T49: render thread, before present. Same as OpenGLRenderer's loader step: a bigger
     // budget while the screen is black, and when the game fades back in, finish every
@@ -1262,9 +1462,11 @@ void DkDisplay::render() {
       dkocean::build_frame(dktf::frame_draws().fog_rgba);  // T95
     }
   }
-  if (s_dk_jak2_dkgl && s_dk_jak2_world && got_chain && focused) {
-    // §7.2 phase 1 (AI-assisted): the native world builds for jak2, same order as jak1
-    // (tfrag first -- the fog). merc/sprite/direct/ocean stay dkgl / inert on this path.
+  if (dk_gen2_world() && got_chain && focused) {
+    // §7.2 phase 1 (AI-assisted) / J4 (jak3): the native world builds for the gen-2 game,
+    // same order as jak1 (tfrag first -- the fog). merc/sprite/direct/ocean stay dkgl /
+    // inert on this path. jak3 builds hfrag after the fog is in (T113/FIX 117 -- the GL
+    // Hfrag renderer needs dktf::frame_draws() fog, like the jak1 path above).
     u64 tp = dk_tick();
     auto lap2 = [&](int pass) {
       const u64 now = dk_tick();
@@ -1278,8 +1480,11 @@ void DkDisplay::render() {
     lap2(kPTie);
     dkshrub::build_frame(s_dk_loader.get());
     lap2(kPShrub);
+    if (g_game_version == GameVersion::Jak3) {
+      dkhfrag::build_frame(s_dk_loader.get());  // J4: bucket 8 mountains (own tod palettes)
+    }
   }
-  if (s_dk_jak2_dkgl && s_dk_jak2_sprite && got_chain && focused) {
+  if (dk_gen2_sprite() && got_chain && focused) {
     dksprite::build_frame();  // §7.2 particles: own vertex/index ring
   }
   const u64 t_build1 = dk_tick();
@@ -1394,7 +1599,7 @@ void DkDisplay::render() {
                       (unsigned long long)dktexgpu::deferred_sync_fallbacks());
       s_tod_last = tod_now;
       prof_report();
-      if (s_dk_jak2_dkgl) {
+      if (dk_gen2_dkgl()) {
         // §7.0 I (AI-assisted): the capture split. drain = from the dma lock to the world
         // reads (tex ops), walk = the tex-bucket walk itself (nested parts subtracted).
         double c[kCapCount];
@@ -1604,6 +1809,15 @@ void dk_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
   std::lock_guard<std::mutex> lk(s_dk_tex_ops_mutex);
   if (s_dk_tex_ops.size() < kMaxTexOps) {
     s_dk_tex_ops.push_back({tpage, mode, s7_ptr, 0, 0});
+  } else {
+    // FIX 123 (AI-assisted): a silent drop here would unlink a whole level's tbps
+    // (upload-now! during a blackout load with no chains flowing to drain the
+    // queue). The old code dropped ops without a trace.
+    static u32 s_dropped_ops = 0;
+    if ((++s_dropped_ops % 64) == 1) {
+      switch_run_logf("[dk] tex op queue FULL: dropped %u upload-now ops (cap %u)",
+                      s_dropped_ops, (u32)kMaxTexOps);
+    }
   }
 }
 void dk_texture_relocate(u32 dst, u32 src, u32 format) {

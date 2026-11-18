@@ -202,9 +202,64 @@ constexpr BucketPass kJak2Passes[12] = {
     {kJak2Lvl(jak2::BucketId::TFRAG_T_L0_ALPHA, jak2::BucketId::TFRAG_T_L1_ALPHA, 5),
      false, false, true, TK::TRANS, TK::TRANS},
 };
+// J3 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md §2): jak3 -- same
+// shape as jak2 but jak3::LEVEL_MAX = 10 levels, so 10 TFRAG_L{n}_TFRAG (NORMAL) passes
+// then 10 TFRAG_L{n}_ALPHA (TRANS) passes. GL registers the NORMAL tree kind only
+// (init_bucket_renderers_jak3), exactly like jak2; note the enum name is TFRAG_L{n}_ALPHA
+// (jak2 calls it TFRAG_T_L{n}_ALPHA). The fog/occlusion walk also takes 10 levels
+// (dispatch_buckets_jak3 num_vis_to_copy = LEVEL_MAX), see capture_fog_gen2 below.
+constexpr int kJak3Lvl(jak3::BucketId a, jak3::BucketId b, int i) {
+  return (int)a + ((int)b - (int)a) * i;
+}
+constexpr BucketPass kJak3Passes[20] = {
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 0),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 1),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 2),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 3),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 4),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 5),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 6),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 7),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 8),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_TFRAG, jak3::BucketId::TFRAG_L1_TFRAG, 9),
+     false, false, false, TK::NORMAL, TK::NORMAL},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 0),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 1),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 2),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 3),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 4),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 5),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 6),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 7),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 8),
+     false, false, true, TK::TRANS, TK::TRANS},
+    {kJak3Lvl(jak3::BucketId::TFRAG_L0_ALPHA, jak3::BucketId::TFRAG_L1_ALPHA, 9),
+     false, false, true, TK::TRANS, TK::TRANS},
+};
 constexpr int kNumPasses = sizeof(kJak1Passes) / sizeof(kJak1Passes[0]);
 constexpr int kJak2NumPassesT = sizeof(kJak2Passes) / sizeof(kJak2Passes[0]);
-constexpr int kMaxPasses = kNumPasses > kJak2NumPassesT ? kNumPasses : kJak2NumPassesT;
+constexpr int kJak3NumPassesT = sizeof(kJak3Passes) / sizeof(kJak3Passes[0]);
+constexpr int kMaxOf3(int a, int b, int c) {
+  return a > b ? (a > c ? a : c) : (b > c ? b : c);
+}
+constexpr int kMaxPasses = kMaxOf3(kNumPasses, kJak2NumPassesT, kJak3NumPassesT);  // 20 (jak3)
 // The active table (defaults to jak1 so the file is safe before set_game, same pattern
 // as dkgl_frame.cpp's s_bucket_ids).
 const BucketPass* s_passes = kJak1Passes;
@@ -478,13 +533,29 @@ const FrameDraws& frame_draws() {
 
 // ---- §7.2 phase 1 (AI-assisted): per-game pass tables ----
 
+// J3 (AI-assisted, jak3 bringup): gen-2 vis/fog sizing. jak2 walks 6 levels of its
+// BUCKET_2 (jak2::LEVEL_MAX), jak3 walks 10 (jak3::LEVEL_MAX, dispatch_buckets_jak3
+// num_vis_to_copy). jak1 reads its fog from the default-regs chain instead (capture_chain
+// below), so s_vis_bucket < 0 = the jak1 path.
+static int s_occ_levels = 0;
+static int s_vis_bucket = -1;
+
 void set_game(GameVersion v) {
   if (v == GameVersion::Jak2) {
     s_passes = kJak2Passes;
     s_pass_count = kJak2NumPassesT;
+    s_occ_levels = 6;                              // jak2::LEVEL_MAX
+    s_vis_bucket = (int)jak2::BucketId::BUCKET_2;
+  } else if (v == GameVersion::Jak3) {
+    s_passes = kJak3Passes;
+    s_pass_count = kJak3NumPassesT;
+    s_occ_levels = 10;                             // jak3::LEVEL_MAX
+    s_vis_bucket = (int)jak3::BucketId::BUCKET_2;
   } else {
     s_passes = kJak1Passes;
     s_pass_count = kNumPasses;
+    s_occ_levels = 0;
+    s_vis_bucket = -1;
   }
 }
 
@@ -496,14 +567,16 @@ void fill_draw_state(DrawMode m, DrawCmd* c) {
   fill_state(m, c);
 }
 
-// §7.2 phase 1: jak2 fog source. GL's VisDataHandler (bucket BUCKET_2) takes the fog
-// colour from the vif0 of each level's vis packet, overwriting per level (last wins);
-// jak1 reads it from the default-regs chain behind the CALL head instead (below).
-// AI-assisted: the same packets also carry each level's 128*16 byte occlusion string (GL
-// VisDataHandler copies them into render_state->occlusion_vis[level]); tfrag/tie feed them to
-// cull_check_all_slow. Cleared every frame like GL's reset. Flag sdmc:/gk_noocc.txt turns it off.
-static uint8_t s_occ[6][128 * 16];
-static bool s_occ_valid[6] = {false, false, false, false, false, false};
+// §7.2 phase 1 (jak2) / J3 (jak3): gen-2 fog source. GL's VisDataHandler (bucket
+// BUCKET_2) takes the fog colour from the vif0 of each level's vis packet, overwriting per
+// level (last wins); jak1 reads it from the default-regs chain behind the CALL head instead
+// (below). AI-assisted: the same packets also carry each level's 128*16 byte occlusion
+// string (GL VisDataHandler copies them into render_state->occlusion_vis[level]);
+// tfrag/tie feed them to cull_check_all_slow. Cleared every frame like GL's reset. Flag
+// sdmc:/gk_noocc.txt turns it off. J3: sized for jak3's 10 levels (jak2 uses 6; the count
+// and the vis bucket id are picked by set_game).
+static uint8_t s_occ[10][128 * 16];
+static bool s_occ_valid[10] = {};
 static bool occlusion_enabled() {
 #if defined(__SWITCH__)
   static const bool s_on = access("sdmc:/gk_noocc.txt", F_OK) != 0;
@@ -513,13 +586,13 @@ static bool occlusion_enabled() {
 #endif
 }
 
-static void capture_fog_jak2(const void* data, uint32_t buckets_base) {
-  for (bool& v : s_occ_valid) {
-    v = false;
+static void capture_fog_gen2(const void* data, uint32_t buckets_base) {
+  for (int i = 0; i < s_occ_levels; i++) {
+    s_occ_valid[i] = false;
   }
-  DmaFollower d(data, buckets_base + 16 * (int)jak2::BucketId::BUCKET_2);
+  DmaFollower d(data, buckets_base + 16 * s_vis_bucket);
   d.read_and_advance();  // the bucket's own NEXT (size 0)
-  for (int i = 0; i < 6 && !d.ended(); i++) {
+  for (int i = 0; i < s_occ_levels && !d.ended(); i++) {
     auto p = d.read_and_advance();
     if (p.vifcode1().kind != VifCode::Kind::PC_PORT) {
       break;  // same stop as VisDataHandler::render
@@ -537,13 +610,14 @@ static void capture_fog_jak2(const void* data, uint32_t buckets_base) {
   }
 }
 
-// jak2 only: the level's occlusion string for pass `pass` (tfrag normal 0..5, tfrag trans 6..11,
-// tie/shrub 0..5), or nullptr when the game sent none / the flag is off.
+// gen-2 only (jak2/jak3): the level's occlusion string for pass `pass` (tfrag normal
+// 0..N-1, tfrag trans N..2N-1, tie/shrub 0..N-1 -- `pass % levels` gives the level in
+// every group), or nullptr when the game sent none / the flag is off.
 const uint8_t* occlusion_string(int pass) {
-  if (s_passes != kJak2Passes || !occlusion_enabled()) {
+  if (s_occ_levels == 0 || !occlusion_enabled()) {
     return nullptr;
   }
-  const int lvl = pass % 6;
+  const int lvl = pass % s_occ_levels;
   return s_occ_valid[lvl] ? s_occ[lvl] : nullptr;
 }
 
@@ -556,11 +630,12 @@ void capture_chain(const void* data, uint32_t start_offset) {
   }
   DmaFollower d(data, start_offset);
   uint32_t buckets_base;
-  if (s_passes == kJak2Passes) {
-    // §7.2 phase 1: jak2 chains have no CALL head -- the bucket table starts at the
-    // offset itself (GL dispatch_buckets_jak2 "buckets_base = current_tag_offset()").
+  if (s_vis_bucket >= 0) {
+    // §7.2 phase 1 (jak2) / J3 (jak3): gen-2 chains have no CALL head -- the bucket table
+    // starts at the offset itself (GL dispatch_buckets_jak2 / dispatch_buckets_jak3
+    // "buckets_base = current_tag_offset()").
     buckets_base = d.current_tag_offset();
-    capture_fog_jak2(data, buckets_base);
+    capture_fog_gen2(data, buckets_base);
   } else {
     if (d.current_tag().kind != DmaTag::Kind::CALL) {
       return;  // not a game frame chain

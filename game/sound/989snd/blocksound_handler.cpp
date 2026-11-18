@@ -288,7 +288,7 @@ void BlockSoundHandler::SetPBend(s32 bend) {
 
 void BlockSoundHandler::DoGrain() {
   auto& grain = m_sfx->Grains[m_next_grain];
-
+  m_last_grain_type = (s32)grain.Type;  // FIX 123: instant-death forensics
   s32 ret = grain(*this);
 
   if (m_skip_grains) {

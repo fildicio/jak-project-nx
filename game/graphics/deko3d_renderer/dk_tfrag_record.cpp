@@ -27,7 +27,7 @@ namespace dktf {
 namespace {
 
 constexpr uint32_t kUboSize = 0x100;     // VertParams (176 B) / FragParams (36 B), padded
-constexpr uint32_t kTexImages = 2048;    // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots)    // dktexgpu descriptor slots
 constexpr uint32_t kFragCache = 16;      // distinct FragParams per frame (dedupe)
 
 struct FragKey {

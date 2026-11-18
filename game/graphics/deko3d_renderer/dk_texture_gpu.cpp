@@ -3,7 +3,7 @@
  * deko3d migration Phase 2.3 (T22b, AI-assisted): the GPU half of the P2.3
  * texture pool. This is the only TU that ties dktex::TextureStore (the bookkeeping
  * half, T19/`dk_texture_pool.h`) to the real deko3d image machinery: it owns a
- * single 48 MB deko3d image memblock, carves DkImage handles out of it with a
+ * single 256 MB (FIX 119) deko3d image memblock, carves DkImage handles out of it with a
  * bump cursor, writes each texture's DkImageDescriptor into the data memblock at
  * (dkdev::desc_off() + 0x100 + slot * dkdev::desc_slot_stride()), and uploads
  * RGBA8 textures through the shared staging buffer + the dedicated upload cmd
@@ -44,25 +44,33 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 
 namespace dktexgpu {
 
-// 48 MB of image memblock, all 0x1000-aligned. 0x3000000 is a DK_MEMBLOCK_ALIGNMENT
-// (0x1000; deko3d.h:140) multiple, so no rounding is needed.
-constexpr uint32_t kImgPoolBytes = 0x6000000;  // T88: 96 MB (mip chains add ~1/3)
+// Image memblock, all 0x1000-aligned (any size here is already a DK_MEMBLOCK_ALIGNMENT
+// (0x1000; deko3d.h:140) multiple, so no rounding is needed).
+// FIX 119 (AI-assisted): 96 -> 256 MB. A 51-minute Haven City session filled the old 96 MB
+// block (live 1972/2048 slots, carved 95 MB, only 36-342 KB free in holes, 2.87M failed
+// uploads) and every upload after that returned id 0 -> black untextured models (Sig in
+// the crew bar; general "polygons have no colors" ~30-40 min in, healed only by exiting
+// the mission, which frees level textures back into the holes). Heap after dk init is
+// 2698 MB free, so +160 MB is safe. Same lesson as T57 (buffer pool 128 -> 384 MB).
+constexpr uint32_t kImgPoolBytes = 0x10000000;  // FIX 119: 256 MB
 
-// 2048 slots; index = the dktex::TextureStore slot. DkImage is a 128-B opaque VALUE
-// struct (DK_DECL_OPAQUE, deko3d.h:82), so a plain C array (no map, no new/delete)
-// is the right shape.
+// FIX 119 (AI-assisted): 2048 -> 4096 store slots. The 51-min session hit high=2048
+// (store completely full, allocs failing) at the same time the image bytes ran out, so
+// both limits move together. Must match dkdev's kMaxTexImages (dk_device.cpp), which
+// sizes the DkImageDescriptor region in the data memblock.
+constexpr uint32_t kMaxTexSlots = 4096;
 static DkMemBlock      s_imgMem  = nullptr;
 static uint64_t        s_cursor  = 0;
 static int             s_bumpFails = 0;
 static dktex::TextureStore s_store;
-static DkImage         s_images[2048];  // [slot]; index = store slot
+static DkImage         s_images[kMaxTexSlots];  // [slot]; index = store slot
 
 // T87 (AI-assisted): image memory is reused. Each slot remembers its range; a freed range
 // goes into s_freeRanges (coalesced) and alloc takes the first range that fits before
 // bumping s_cursor. Before T87 nothing was ever freed: 2048 slots / 41 MB were gone after
 // ~6 areas, level loads failed and retried forever (stutter + slow motion on area change).
-static uint64_t s_slotOff[2048];
-static uint64_t s_slotSize[2048];
+static uint64_t s_slotOff[kMaxTexSlots];
+static uint64_t s_slotSize[kMaxTexSlots];
 static std::map<uint64_t, uint64_t> s_freeRanges;  // offset -> size
 static uint64_t s_freedBytes = 0;                  // bytes in s_freeRanges
 
@@ -145,10 +153,10 @@ bool init() {
   mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;  // override the CpuUncached|GpuCached default
   s_imgMem = dkMemBlockCreate(&mm);
   if (s_imgMem == nullptr) {
-    switch_run_logf("[dk] tex img memblock 96 MB failed");
+    switch_run_logf("[dk] tex img memblock %u MB failed", kImgPoolBytes >> 20);
     return false;
   }
-  if (!s_store.init(2048)) {
+  if (!s_store.init(kMaxTexSlots)) {
     dkMemBlockDestroy(s_imgMem);
     s_imgMem = nullptr;
     return false;
@@ -185,7 +193,7 @@ uint32_t upload_rgba8(uint32_t w, uint32_t h, const void* src) {
   if (id == 0) {
     return 0;  // store already counted the failed_allocs
   }
-  // (b) slot for the descriptor + DkImage (id is live, so slot < 2048).
+  // (b) slot for the descriptor + DkImage (id is live, so slot < kMaxTexSlots).
   uint32_t slot = s_store.slot_of(id);
 
   // (c) image layout for a 1-mip RGBA8 2D texture.
@@ -430,7 +438,7 @@ uint32_t upload_bcn(dktex::Fmt fmt, uint32_t w, uint32_t h, const void* src,
   if (id == 0) {
     return 0;  // store already counted the failed_allocs
   }
-  // (c) slot for the descriptor + DkImage (id is live, so slot < 2048).
+  // (c) slot for the descriptor + DkImage (id is live, so slot < kMaxTexSlots).
   uint32_t slot = s_store.slot_of(id);
 
   // (d) payload sanity: blocks = ceil(w/4)*ceil(h/4); block bytes 8 (BC1) / 16

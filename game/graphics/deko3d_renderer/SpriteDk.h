@@ -14,6 +14,8 @@
 
 #include "game/graphics/opengl_renderer/buckets.h"  // jak2::BucketId (phase 1 walk)
 
+enum class GameVersion : int;  // common/versions/versions.h (J3 set_game corner-order pick)
+
 namespace dksprite {
 
 // jak1 buckets.h: TextureUploadHandler buckets (tfrag/shrub/alpha/pris/water l0+l1, common).
@@ -53,6 +55,66 @@ inline constexpr int kJak2TexBuckets[47] = {
     (int)jak2::BucketId::TEX_ALL_MAP,     (int)jak2::BucketId::SUBTITLE,
 };
 inline constexpr int kJak2SpriteBucket = (int)jak2::BucketId::PARTICLES;  // 313
+
+// J3 (AI-assisted, jak3 bringup -- docs/deko3d/jak3-bucket-census.md §2/§3): every jak3
+// TextureUploadHandler bucket of init_bucket_renderers_jak3 in GL dispatch order (ids
+// ascending, 10 levels per block), including DEBUG_NO_ZBUF1 577 (jak2's 318 pattern: its
+// uploads replay in this walk and the dkgl hook fires at its position -- it is also in
+// dkgl_frame's kJak3Buckets). No TEX_LCOM_PRIS2 456: GL leaves it unregistered
+// (census §2). The sprite data lives in PARTICLES (570, GL "particles" Sprite3); jak3
+// shares jak2's sprite layout (SpriteFrameData, GL Sprite3 "case Jak2/Jak3") except the
+// HUD program immediate (Sprites2dHud_Jak3) and the flag&0x30 corner order (do_block).
+inline constexpr int kJak3TexBuckets[71] = {
+    (int)jak3::BucketId::TEX_LCOM_SKY_PRE,                                   // 4
+    // tfrag block (stride 12)
+    (int)jak3::BucketId::TEX_L0_TFRAG,    (int)jak3::BucketId::TEX_L1_TFRAG,
+    (int)jak3::BucketId::TEX_L2_TFRAG,    (int)jak3::BucketId::TEX_L3_TFRAG,
+    (int)jak3::BucketId::TEX_L4_TFRAG,    (int)jak3::BucketId::TEX_L5_TFRAG,
+    (int)jak3::BucketId::TEX_L6_TFRAG,    (int)jak3::BucketId::TEX_L7_TFRAG,
+    (int)jak3::BucketId::TEX_L8_TFRAG,    (int)jak3::BucketId::TEX_L9_TFRAG,
+    // shrub block (stride 10)
+    (int)jak3::BucketId::TEX_L0_SHRUB,    (int)jak3::BucketId::TEX_L1_SHRUB,
+    (int)jak3::BucketId::TEX_L2_SHRUB,    (int)jak3::BucketId::TEX_L3_SHRUB,
+    (int)jak3::BucketId::TEX_L4_SHRUB,    (int)jak3::BucketId::TEX_L5_SHRUB,
+    (int)jak3::BucketId::TEX_L6_SHRUB,    (int)jak3::BucketId::TEX_L7_SHRUB,
+    (int)jak3::BucketId::TEX_L8_SHRUB,    (int)jak3::BucketId::TEX_L9_SHRUB,
+    // alpha block (stride 11)
+    (int)jak3::BucketId::TEX_L0_ALPHA,    (int)jak3::BucketId::TEX_L1_ALPHA,
+    (int)jak3::BucketId::TEX_L2_ALPHA,    (int)jak3::BucketId::TEX_L3_ALPHA,
+    (int)jak3::BucketId::TEX_L4_ALPHA,    (int)jak3::BucketId::TEX_L5_ALPHA,
+    (int)jak3::BucketId::TEX_L6_ALPHA,    (int)jak3::BucketId::TEX_L7_ALPHA,
+    (int)jak3::BucketId::TEX_L8_ALPHA,    (int)jak3::BucketId::TEX_L9_ALPHA,
+    // lcom tfrag / shrub
+    (int)jak3::BucketId::TEX_LCOM_TFRAG,  (int)jak3::BucketId::TEX_LCOM_SHRUB,
+    // pris block (stride 5)
+    (int)jak3::BucketId::TEX_L0_PRIS,     (int)jak3::BucketId::TEX_L1_PRIS,
+    (int)jak3::BucketId::TEX_L2_PRIS,     (int)jak3::BucketId::TEX_L3_PRIS,
+    (int)jak3::BucketId::TEX_L4_PRIS,     (int)jak3::BucketId::TEX_L5_PRIS,
+    (int)jak3::BucketId::TEX_L6_PRIS,     (int)jak3::BucketId::TEX_L7_PRIS,
+    (int)jak3::BucketId::TEX_L8_PRIS,     (int)jak3::BucketId::TEX_L9_PRIS,
+    (int)jak3::BucketId::TEX_LCOM_PRIS,
+    // pris2 block (stride 5)
+    (int)jak3::BucketId::TEX_L0_PRIS2,    (int)jak3::BucketId::TEX_L1_PRIS2,
+    (int)jak3::BucketId::TEX_L2_PRIS2,    (int)jak3::BucketId::TEX_L3_PRIS2,
+    (int)jak3::BucketId::TEX_L4_PRIS2,    (int)jak3::BucketId::TEX_L5_PRIS2,
+    (int)jak3::BucketId::TEX_L6_PRIS2,    (int)jak3::BucketId::TEX_L7_PRIS2,
+    (int)jak3::BucketId::TEX_L8_PRIS2,    (int)jak3::BucketId::TEX_L9_PRIS2,
+    // sky post + water block (stride 10) + lcom water
+    (int)jak3::BucketId::TEX_LCOM_SKY_POST,
+    (int)jak3::BucketId::TEX_L0_WATER,    (int)jak3::BucketId::TEX_L1_WATER,
+    (int)jak3::BucketId::TEX_L2_WATER,    (int)jak3::BucketId::TEX_L3_WATER,
+    (int)jak3::BucketId::TEX_L4_WATER,    (int)jak3::BucketId::TEX_L5_WATER,
+    (int)jak3::BucketId::TEX_L6_WATER,    (int)jak3::BucketId::TEX_L7_WATER,
+    (int)jak3::BucketId::TEX_L8_WATER,    (int)jak3::BucketId::TEX_L9_WATER,
+    (int)jak3::BucketId::TEX_LCOM_WATER,
+    // singles after the water block
+    (int)jak3::BucketId::TEX_SPRITE,                                       // 568
+    (int)jak3::BucketId::TEX_WARP,                                         // 575
+    (int)jak3::BucketId::DEBUG_NO_ZBUF1,                                   // 577 (boot logo)
+    (int)jak3::BucketId::TEX_HUD_HUD_ALPHA,                                // 578
+    (int)jak3::BucketId::TEX_HUD_PRIS2,                                    // 580
+};
+inline constexpr int kJak3SpriteBucket = (int)jak3::BucketId::PARTICLES;  // 570
 
 // std140 mirror of sprite3.vert.glsl SpriteVert (vertex binding 7).
 struct SpriteVertParams {
@@ -189,5 +251,13 @@ void set_near_fade(float screen_frac_end);
 void record_world(int fb_w, int fb_h);
 // #17 (AI-assisted, Switch only): early-Z shader for sprites without depth write (default on).
 void set_early_z(bool on);
+
+// ---- J3 (AI-assisted, jak3 bringup): per-game sprite differences ----
+// jak3 re-maps the sprite corner order from the flag bits 0x30 (GL Sprite3 "note that PC
+// swaps the last two vertices") and nothing else here: its bucket layout, frame data and
+// glow/distort sections are jak2's (walk list + sprite bucket are parameters of
+// capture_chain, see kJak3TexBuckets / kJak3SpriteBucket above). Default = off (jak1/jak2
+// behaviour); dk_renderer calls set_game at boot, before the first capture.
+void set_game(GameVersion v);
 
 }  // namespace dksprite

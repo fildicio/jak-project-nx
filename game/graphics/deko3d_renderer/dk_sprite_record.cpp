@@ -17,7 +17,7 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 namespace dksprite {
 namespace {
 
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 
 // GL Sprite3::opengl_setup_normal: SpriteVertex3D (64 B). xyz_sx/quat_sy/rgba floats,
 // flags_matrix u16x2 and info u16x4 through glVertexAttribIPointer.

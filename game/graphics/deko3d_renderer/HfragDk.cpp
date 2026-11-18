@@ -23,6 +23,9 @@
 
 #include "common/dma/dma_chain_read.h"
 #include "common/custom_data/Tfrag3Data.h"
+#include "common/versions/versions.h"  // J3 (jak3 bringup): set_game chain-shape pick
+
+#include "game/graphics/opengl_renderer/buckets.h"  // J3: jak3::BucketId::HFRAG check
 
 #if defined(DK_HOST_REPLAY)
 #include "game/graphics/deko3d_renderer/TFragmentDk.h"
@@ -77,8 +80,14 @@ constexpr uint32_t kMontSize = 128;  // MontageTexture fb size
 constexpr uint32_t kTodColors = 8192;
 constexpr int kMaxLevels = 2;  // GL kMaxLevels
 constexpr int kHfragBucketJak1 = 8;  // buckets.h HFRAG
+// J3 (jak3 bringup): jak3::BucketId::HFRAG is also 8 (buckets.h) -- same bucket, only the
+// chain head differs (no CALL to the default-regs chain on the gen-2 games).
+static_assert((int)jak3::BucketId::HFRAG == kHfragBucketJak1);
+// J3: jak3 chains start at the bucket table itself (GL dispatch_buckets_jak3), like
+// jak2's. Defaults to false = the jak1 CALL head, safe before set_game.
+bool s_jak3_chain = false;
 constexpr uint32_t kUboSize = 0x100;
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots (dk_tfrag_record)
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 constexpr uint32_t kIndsPerBucket = kIndsPerTile * kNumTiles;
 
 // ---- capture: the bucket's TfragPcPortData packets ---------------------------
@@ -106,6 +115,10 @@ bool is_dma_nop(const DmaTransfer& xfer) {
 
 namespace dkhfrag {
 
+void set_game(GameVersion v) {
+  s_jak3_chain = v == GameVersion::Jak3;
+}
+
 void capture_chain(const void* data, uint32_t start_offset) {
   s_ncap = 0;
   for (auto& c : s_cap) {
@@ -116,10 +129,18 @@ void capture_chain(const void* data, uint32_t start_offset) {
   }
   s_diag.calls++;
   DmaFollower d(data, start_offset);
-  if (d.current_tag().kind != DmaTag::Kind::CALL) {
-    return;  // not a game frame chain
+  uint32_t buckets_base;
+  if (s_jak3_chain) {
+    // J3 (jak3): gen-2 chains have no CALL head (GL dispatch_buckets_jak3
+    // "buckets_base = dma.current_tag_offset(); // starts at 0 in jak 2") -- the bucket
+    // table starts at the offset itself.
+    buckets_base = d.current_tag_offset();
+  } else {
+    if (d.current_tag().kind != DmaTag::Kind::CALL) {
+      return;  // not a game frame chain
+    }
+    buckets_base = d.current_tag_offset() + 16;
   }
-  const uint32_t buckets_base = d.current_tag_offset() + 16;
   const uint32_t slot = buckets_base + 16 * kHfragBucketJak1;
   const uint32_t next = slot + 16;
   DmaFollower b(data, slot);

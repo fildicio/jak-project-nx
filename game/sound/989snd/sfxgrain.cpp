@@ -75,6 +75,7 @@ s32 Grain::snd_SFX_GRAIN_TYPE_TONE(BlockSoundHandler& handler) {
 
   handler.m_vm.StartTone(voice);
   handler.m_voices.emplace_front(voice);
+  handler.m_had_voice = true;  // FIX 123: instant-death forensics
 
   return 0;
 }

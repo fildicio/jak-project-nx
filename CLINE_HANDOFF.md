@@ -1219,3 +1219,634 @@ low-pitch `generic-beep` when the mission's play-node was closed (= already comp
   mission/race is still untested on hardware (pre-existing FIX 82 caveat).
 - jak3 still has the FIX 82 forward-only block; lift it the same way if the user wants it.
 
+## 2026-11-16 — EN/IT language trim (both games) + punch white-box probe deployed (AI-assisted)
+
+Two jobs, both live on the card as of this session.
+
+### 1. Languages stripped to English + Italian (jak1 AND jak2)
+**Menus (GOAL, rebuilt via `./build-host/goalc/goalc --game jakN --instruction-set arm64 --cmd '(make-group "iso")'`):**
+- jak2 `goal_src/jak2/pc/progress/progress-static-pc.gc`: the three carousels
+  (`subtitle-language`, `sound-language`, `text-language`) now have 2 items
+  (English, Italiano) with explicit index↔enum translation — `english=0`,
+  `italian=4` in BOTH `pc-language` and `language-enum`. Old saved settings
+  outside EN/IT show as English; one confirm snaps them to EN/IT.
+- jak1 `goal_src/jak1/pc/progress-pc.gc`: `*text-languages*` / `*subtitle-languages*`
+  trimmed to `(english italian)` — safe because jak1's confirm path is NAME-based
+  (`assoc` into `*language-remap-info-pc*`), not positional. Sound language
+  (the `game-option-type language` cycler) remapped to EN(0)/IT(4): back/forward
+  toggles between 0 and 4, and the sliding display's next/prev/next2/prev2 are
+  computed for 2 items. **Careful:** the file has TWO copies of the neighbour
+  arithmetic — the GENERIC `progress-draw-carousell-from-string-list` helper
+  (~line 1400, must stay `mod` arithmetic, it serves every string-list carousel)
+  and the language one (~line 3169). Only the second was patched.
+
+**Files kept (local `out/jakN/iso` + SD `switch/jakN/data/out/jakN/iso`):**
+- jak1: `{0,4,6}COMMON.TXT` + `{0,4,6}SUBTIT.TXT` (6=uk-english for the SCEE
+  first-boot remap), `SCREEN1.{EUR,USA,ITA}`, `VAGWAD.{ENG,ITA}`.
+- jak2: `{0,4,7}COMMON.TXT` + `{0,4,7}SUBTI2.TXT`, `SCREEN1.{EUR,USA,ITA,DEE,DEJ,DEM}`,
+  `VAGWAD.{ENG,ITA}`.
+- Deleted everything else: ~**3.0 GB freed on the card** (jak1 data 1.90→1.21 GB,
+  jak2 5.68→3.26 GB) and ~3.0 GB locally. Missing-language fallbacks are graceful
+  (text loader returns 0, VO `find_in` null).
+
+**TRAP:** `(make-group "iso")` RE-CREATES the deleted language files from the
+extraction data. Always re-delete after a rebuild (or the next SD sync resurrects
+them). This session re-deleted after the rebuild; lists are in the commands above.
+
+**Deployed (md5 verified local == SD):**
+- `jak1.nro` `eb13960baee29addd2b34f528f9ad195`, `jak2.nro` `152164ddf3d6f2551e38bec689bd1855`
+- `jak1/iso/ENGINE.CGO` `406060def2ec853d1c02373ad393fa69`, `jak1/iso/GAME.CGO` `f64b25666f251deebd216fe5b287817d`
+- `jak2/iso/GAME.CGO` `2d4123d3ba4c318e529fdef6e0dfc814`, `jak2/iso/TSZ.DGO` `b501235c65e659b35468761902c44b1e`
+- All other CGO/DGO were byte-identical after the rebuild (checked 179 files) — not redeployed.
+- Backups rotated into `~/Desktop/jak bakcups/`: `jak1.e261551f.bak`, `jak2.2c251cf7.bak`,
+  `jak1-GAME.CGO.c1f1245b.bak`, `jak2-GAME.CGO.3000efb0.bak`, `jak1-ENGINE.CGO.<md5>.bak`,
+  `jak2-TSZ.DGO.<md5>.bak`.
+
+### 2. jak2 punch white-box flash — probe deployed (DKGL_TODO row R)
+Audit result: every miss path ALREADY skips (SpriteDk build_frame, slot_of(0),
+dk_sprite_lookup null/placeholder, all upload failure paths return 0) and every
+stats counter in the user's log is clean except `sprite no_tex=1` — so the visible
+white quad is NOT a drawn miss. Probe added in `dk_sprite_lookup`
+(game/graphics/pipelines/dk_renderer.cpp): every texture miss now logs
+`[sprtex] MISS tbp=<page> <texture-name-or-no-page>` (first 40, then every 600th).
+**HW test:** play jak2, reproduce the punch flash once, then grep `MISS` in
+`gk_run_log.txt` — a MISS at the flash ⇒ the box is drawn elsewhere (distort/glow
+snapshot or wrong-resolve); no MISS ⇒ look at the `[sprtex] tbp=... id=...` pairing
+lines at that timestamp for a wrong texture (row-M class).
+
+### 3. VO language never switched in-session (jak2) — FIXED, deploy pending (AI-assisted)
+**User report:** playing in Italian, switching Speech Language to English in Options kept Italian voices.
+- **Mechanism:** VO is streamed per dialog line from `VAGWAD.<lang>`; the overlord's
+  `gLanguage` picks the suffix and is only changed by the `set-language` RPC
+  (jak2 `srpc.cpp` `case set_language`). That RPC is sent by `setting-control`'s
+  per-frame `update()` ONLY when it sees `user-current != user-target`
+  (`apply-settings` first copies `user-default → user-target` every frame).
+- **Bug (inherited from upstream):** `game-options-pc-sound-language`'s on-confirm
+  wrote BOTH `user-default` AND `user-current` — so current == target, the diff never
+  tripped, the RPC never fired, and `gLanguage` stayed on the boot language. The
+  choice was still saved (`game-language` in `pc-settings.gc`), which is why a full
+  game restart DID apply it ("VO after reload" above).
+- **Fix** (`goal_src/jak2/pc/progress/progress-static-pc.gc`): on-confirm now also
+  calls `(set-language lang)` directly (sends the RPC immediately; the suppressed
+  diff avoids a duplicate). Voices switch from the NEXT spoken line — no restart.
+- **jak1 is NOT affected:** its cycler writes only `default.language` through the
+  `value-to-modify` pointer, so the diff path fires and the RPC goes out live
+  (overlord prints `IOP language: <lang>` in the log each switch — use that to
+  verify on HW).
+- **Rebuilt** (`/tmp/goalc_jak2_fix.log`, 0 errors): `GAME.CGO` `2d4123d3…` →
+  `8da29cac1f0894e084f4c6c7fa9536db` (deterministic), `TSZ.DGO` →
+  `0efa34e036f2206d69fb744af1025bec`. NOTE: `TSZ.DGO` is NOT build-deterministic
+  (two no-change builds differ; GAME.CGO reproduces byte-for-byte) — don't md5-bisect it.
+- **SD was UNMOUNTED this session** — deploy when the card is back (no NRO change,
+  GOAL data only):
+  ```
+  SD="/Volumes/SWITCH SD/switch/jak2/data/out/jak2/iso"   # adjust to real path
+  B="$HOME/Desktop/jak bakcups"; ISO=out/jak2/iso
+  for f in GAME.CGO TSZ.DGO; do cp "$SD/$f" "$B/jak2-$f.$(md5 -q "$SD/$f" | cut -c1-8).bak"; cp "$ISO/$f" "$SD/$f"; done
+  md5 -q "$SD/GAME.CGO" "$SD/TSZ.DGO"   # expect 8da29cac… / 0efa34e0…
+  ```
+- Cleanup trap hit twice this session: the rebuild resurrects ALL language files.
+  This time `rm VAGWAD.*` also killed ENG/ITA locally (restored via rebuild, md5s
+  unchanged `f7b3ae73…`/`5de6270f…`). Always delete with an EXPLICIT name list.
+  Final local state = keep-list exactly (555 files).
+
+### User HW checklist
+1. jak2 + jak1 menus: language options show English/Italiano only; pick Italian,
+   confirm text/subtitles switch. VO: jak2 switches from the next spoken line
+   (after deploying §3); jak1 switches live already. Log check: `IOP language:` lines.
+2. Reproduce the punch white box once in jak2; send `gk_run_log.txt`.
+3. Optional carried items: DKGL pass-2 60 fps perf test (row I), jak3 level-select lift.
+
+---
+
+## FIX 118 — jak2 mission-blackout ZSTD crash root-caused & fixed (2026-11-18, AI-assisted)
+
+**The recurring crash:** deterministic `ZSTD_decompress` "Src size is incorrect" ASSERT
+during jak2 mission-blackout loads (both symbolized stacks ended in the one-shot fr3
+decompressor, failing instruction 0x951864; crash 2 = blackout re-request of `consiteb.fr3`,
+a 3.58 MB file with a game-queued load in flight).
+
+**Root cause (proven by elimination):** the jak2 overlord streamed its fake-CD data with
+**no `SWITCH_FS_LOCK`** while the loader thread held the lock and read fr3s through the
+same newlib fsdev layer:
+- `/tmp/ztest/zshot` one-shot harness PASSED on both SD and local `consiteb.fr3` → file
+  content + algorithm clean, corruption is runtime, on-device.
+- malloc thread-safety verified (`__malloc_lock` = real recursive lock); `read_binary_file`
+  checks fread; FsLock.h sound; Loader.cpp crash site clean.
+- **The gap:** jak1 overlord + common fake_iso take SWITCH_FS_LOCK (fake_iso.cpp:163,191),
+  but **nothing in `game/overlord/jak2/` did**. The only raw stdio there is `iso_cd.cpp`:
+  `sceCdRead` (thpool task: fseek+fread), `read_remaining_pages_inline` (FIX 65 made page
+  runs back-to-back freads on the ISO thread — intensified the window), and a `fclose`.
+  A mission blackout is exactly when heavy page streaming (DGO/VO via `sceCdReadPages`)
+  overlaps the loader's big fr3 read. newlib's devoptab (descriptor table, shared fsp-srv
+  session) is unsynchronized → the loader's in-flight fread comes back with garbage bytes
+  → one-shot zstd sees a bogus frame → assert. Normal gameplay races the same way but
+  with far less overlap; the loader is the one reader that VALIDATES content, so it's the
+  one that crashes.
+
+**Fix (`game/overlord/jak2/iso_cd.cpp`):** added `#include "common/util/FsLock.h"` and
+`SWITCH_FS_LOCK()` in three places: (1) `sceCdRead` do_read (covers fseek+fread, scope =
+lambda), (2) per-page inside `read_remaining_pages_inline` (fine-grained so loader/kernel
+interleave between pages), (3) the `fclose` before swapping `gFakeCd.fp`. `open_fr` was
+already covered (FileUtil `open_file` takes the lock). Note: `read_remaining_pages_inline`'s
+"position is right after the last page" no-fseek trick is unaffected — the lock is released
+between pages and other lock-takers use their own FILE*s, not `gFakeCd.fp`.
+
+**Deployed:** rebuilt in docker (clean, 743/743, 0 errors — CMake re-ran so it was a full
+rebuild, ~9 min). NRO `jak2.nro` md5 `14739204dcd041390a31d68b52d45a04` (16,463,467 B);
+old live NRO (md5 `ae701e6f…`) rotated to `jak2.nro.bak-ae701e6f`; desktop copy
+`~/Desktop/jak bakcups/jak2.f118.nro`. **VO language fix (GAME.CGO `8da29cac…`, TSZ.DGO
+`0efa34e0…`) verified already deployed on the card** — nothing left to ship there.
+
+**HW test:** play jak2 through a mission blackout (the crash repro, ideally the exact
+mission that always hit it) with dialogue/VO active; confirm no zstd assert. If a crash
+still occurs, grab `gk_stdout.txt`/`gk_run_log.txt` + `gk_fatal.txt` — but the fsdev race
+was the only remaining unlocked I/O in the jak2 overlord (word-boundary stdio grep over
+`game/overlord/jak2/` + `game/overlord/common/` = iso_cd.cpp and common/fake_iso.cpp only,
+and the latter is locked).
+
+---
+
+## FIX 119 — texture pool exhaustion (black/no-color models after ~30-40 min; Sig in the crew bar) (AI-assisted)
+
+**Status 2026-11-18 (evening):** the last session in `gk_run_log.txt` (NRO `896798cb` =
+FIX 119 + `(lod-force-tie 1)`, ~5 min Haven) shows the fix working short-term: `tex pool
+full` **0**, tex live high 2057/4096, mem 79 MB of 256. Still needs the 60+ min playtest.
+**Same deploy added the half-res sky render target** (NRO `9d7727d7`, see DKGL_TODO §7.2
+"Half-res sky render target"): boot log must show `[dkgl] sky half-res on …`; kill switch
+`sdmc:/switch/jak2/gk_dkgl_fullsky.txt`. Expected sky b5 3 → ~1-1.5 ms in `gpu top`.
+
+**Symptom (user):** first crew-bar entry shows Jak/Sig as black untextured silhouettes;
+the same "polygons have no colors" state appears ~30-40 min into any session; exiting the
+mission or restarting restores colors. No crash.
+
+**Root cause (proven from `gk_run_log.txt`):** the dktexgpu image pool filled. At t≈3084 s
+(51 min) the telemetry reads `tex live=1972 high=2048 fail=2870585 freed=15933 mem=98304KB
+holes=36KB` with 1023 `[dk] tex pool full (95 MB carved, …)` lines — the 96 MB image
+memblock AND the 2048-slot TextureStore cap were both exhausted. Every upload after that
+returns id 0 → those textures render black; mission exit releases level textures back into
+the holes (T87 free-range reuse) → later re-upload attempts succeed → colors return. Same
+failure class as the T55/T57 buffer-pool fill (128→384 MB) — long-session streaming simply
+outgrew the carve-out. (Crew-bar entry is late enough in a session to hit the same wall.)
+
+**Fix (3 constants + 8 bindings):**
+- `dk_texture_gpu.cpp`: `kImgPoolBytes` 96 MB (`0x6000000`) → 256 MB (`0x10000000`); new
+  `kMaxTexSlots = 4096` used for `s_images[]`/`s_slotOff[]`/`s_slotSize[]` and
+  `s_store.init()`; memblock-fail log now prints the size; stale 48 MB header comments fixed.
+- `dk_device.cpp`: `kMaxTexImages` 2048 → 4096 (descriptor region grows to `0x20100`;
+  kOffUbo/kOffSamplers/kDataPool all derive automatically → data memblock `0x2C5000`;
+  static_asserts still hold). Must stay in sync with `kMaxTexSlots`.
+- 8 draw recorders (`HfragDk`, `dk_eye_record`, `dk_sprite_record`, `dk_direct_record`,
+  `dkgl/dkgl_frame`, `dk_tfrag_record`, `dk_ocean_flush`, `dk_merc_record`):
+  `kTexImages` 2048 → 4096 — the count passed to `dkCmdBufBindImageDescriptorSet` MUST
+  cover the store, or slots ≥2048 sample garbage.
+- `dk_renderer.cpp`: init log now says "256 MB image memblock, 4096 slots".
+- Memory check: `[heap] dk after init` on this console = 2698 MB free; +160 MB is safe.
+- `scripts/ai/check-dk.py`: PASS (the 1 dk_eye_record warning is pre-existing heuristic
+  noise, surfaced only because the file was touched).
+
+**Deployed:** docker build clean (incremental 23/23, 0 errors). NRO md5
+`eae0e2959af435003f76227f92ef6a75` (16,463,467 B) on card as `jak2.nro`; f118
+(`14739204…`) rotated to `jak2.nro.bak-14739204`; desktop copy
+`~/Desktop/jak bakcups/jak2.f119.nro`. **Includes FIX 118** (same tree), so the blackout
+zstd test continues to be covered by this NRO.
+
+**HW test:** play 60+ min continuously (roam Haven City, several areas + one mission);
+watch `[dk] tex live=… mem=…` telemetry — mem should plateau below 256 MB, `fail=` must
+stay 0, and no `[dk] tex pool full` lines. Crew bar should show Sig with full colors on
+first entry. If it still fills after hours, the next lever is BCn direct upload
+(`dk_texture_pool.h` already reserves Fmt::Bc1-7; RGBA8 decode is the 4-8× memory
+multiplier) or LRU eviction, not another size bump.
+
+## FIX 120 — jak2 ship-to-nest silent exit root-caused: corrupt `nest.fr3` (2026-11-18, AI-assisted)
+
+**Symptom:** taking the ship to the Metal Head nest exits the game silently — every
+build, every session. Three `decompress_zstd` asserts in `gk_run_log.txt` (34187/35292/
+36310) all read `ZSTD error: Src size is incorrect`.
+
+**Correction of the FIX 118 record:** the two crashes at `0x864` (S1/S2) were the OLD
+pre-f118 `ae701e6f` NRO — symbolized by fingerprinting every backup NRO's
+`decompress_zstd` line-43 call site (`scripts/ai/fingerprint_nro.py`); only S3 (`0x104`
+→ resolves to `private_assert_failed+0x24` at base `0x376b6da000`) ran f119. The
+"FIX 118 didn't fix it" conclusion was half-right: it didn't, but not because of locking.
+
+**Root cause (proven, not theorized):** `out/jak2/fr3/nest.fr3` was 9,508,205 bytes =
+[8-byte header][complete valid 9,505,915-byte zstd frame][**2,282 stale trailing
+bytes**] — the tail of an older, longer copy left behind by a non-truncating file
+replace. One-shot `ZSTD_decompress` requires the frame to consume the whole source →
+`Src size is incorrect` → assert → `_exit(1)`. Card and Mac copies were md5-identical
+(bad at the source). All 148 card fr3s are md5-clean vs the extraction; a full
+`zstd -t` sweep found exactly one bad file: `nest.fr3`. `scripts/ai/zrepro <file>`
+(`clang … -lzstd`) reproduces the game's exact error locally in 1 s — use it first on
+any future `compress.cpp:43` assert; do NOT start from threading theories.
+
+**Fixes:**
+1. **Data:** truncated `nest.fr3` to 9,505,923 B (frame ends exactly; decompresses to
+   the declared 32,360,888 B). Repaired on the Mac AND copied to
+   `sdmc:/switch/jak2/data/out/jak2/fr3/nest.fr3` (md5 `b137c5aceb999251a71a784a5e33ccab`,
+   corrupt copies kept as `nest.fr3.corrupt-backup` on both). **No rebuild needed** —
+   the current f119 NRO can play the mission with just the repaired file.
+2. **Code:** `common/util/compress.cpp decompress_zstd` now trims the source to
+   `ZSTD_findFrameCompressedSize(...)` when the file carries trailing bytes (logs
+   `lg::warn("decompress_zstd: ignoring N trailing bytes…")` and loads instead of
+   dying). Truncated frames (no complete frame) still assert exactly as before.
+   jak1/jak3/jak1-pal fr3 sweeps: all clean.
+
+**Also noted, not fixed here:** `game/kernel/jak2/kdgo.cpp` (and jak1/jak3 variants)
+does unlocked `fread`s — boot-only (`load_and_link_dgo_from_c_fast`, GAME.CGO at
+DiskBoot), so it cannot explain mission crashes, but it is the last unlocked stdio user
+and worth a `SWITCH_FS_LOCK` in a future hygiene pass.
+
+**HW test:** load the save, take the ship to the Metal Head nest — expect the level to
+load and no `[ASSERT] compress.cpp:43` in the log. With the FIX 120 NRO, even a
+re-corrupted file would log `ignoring N trailing bytes` and keep playing.
+
+## FIX 121 — audio desync (gun course) + black destructible walls/moving textures (2026-11-18, AI-assisted)
+
+Two user reports, both root-caused from `gk_run_log.txt` + code. NRO f121 md5
+`13bfa1de5908f976182b8320b3689c14` (16,463,467 B); f120 rotated to
+`jak2.nro.bak-26585e19` on card, `~/Desktop/jak bakcups/jak2.f121.nro` saved.
+
+**1. Audio desync, worst during the scatter gun course.** The `[aud] 10s plays` lines are
+logged by the audio thread once per 10 *audio*-seconds (48 000 samples mixed), and their
+log timestamps are wall-clock: quiet windows are exactly +10.00 s apart, busy windows run
++10.06…**+10.72** s (192.486→203.201, 224.213→234.605). That is the 240 Hz sound clock
+(`Player::mTick`, counted inside the SDL callback) permanently falling behind the frame
+clock — everything scheduled on it (MIDI course music, announcer, grain delays) drifts
+out of sync with the vblank-driven on-screen timer. Three causes, all fixed:
+- `Player::PlaySound` built a **full BlockSoundHandler before CheckInstanceLimit discarded
+  it** (the ctor even executes immediate grains = voice allocation). GOAL retriggers limited
+  sounds at up to 4190 plays / 4019 rejected per 10 s window, all under `mTickLock` — the
+  same lock the ~21 ms audio callback needs. FIX 121 adds a decision-identical pre-check
+  (`player.cpp`) that counts same-sound instances off the bank's SFX def and returns 0
+  without constructing anything; the steal branch (tick/vol flags) still runs the original
+  path.
+- `Player::LoadBank` held `mTickLock` for the **entire multi-MB bank parse/memcpy**
+  (`Loader::BankLoad`) — every district bank swap (see the `[aud] bank unload` lines)
+  blew the callback deadline. `Loader::BankLoad` is split into `ParseBank` (no shared
+  state, runs unlocked; `mBanks` is GOAL-thread-only, the audio Tick never reads it) +
+  `AddBank` (cheap locked insert). `SFXFlags` accessors made `const` for the pre-check.
+- Only 1024 frames (~21 ms) of SDL device buffer (`cubeb_shim.h`). Now 2048 (~43 ms):
+  a late callback is a buffer the sound clock never gets back, so the tolerance doubled.
+  (Pin status unchanged — FIX 70b opt-in.)
+**Verify on HW:** consecutive `[aud] 10s plays` timestamps should stay within ~±0.1 s of
+10 s apart even during the gun course; gunfire-heavy windows should no longer lose
+hundreds of ms per 10 s.
+
+**2. Destructible walls / moving objects displayed black.** The run log names the
+victims as placeholder-forever textures: 1776 `[sprtex] MISS` lines for
+`ctywide-spriteticker-a/b` (the moving ticker tapes), `ctyport-sprite/sign-krew-international`,
+`ctywide-spritebaron-propoganda-logo`, title sprites. Root cause:
+`TextureAnimator.cpp` banned ALL jak2 DMA-driven publishing on Switch
+(`publish_dma_textures = false`, SKULL_GEM-only fixed arrays, slime off — commit 429e36f7a)
+because the composites "drew empty under dkgl". The empty draws were not a mystery:
+**dkgl skips GL_INT vertex-attrib quads outside the allow-list** (`dkgl_draw.cpp`, the
+`set_int_attrib_draws` gate added for the skull gem, HW-proven since f97fd4013 — clouds
+use it too). FIX 121:
+- `dk_texture_anim` (`dk_renderer.cpp`) now wraps the whole animator run in
+  `dkgl::set_int_attrib_draws(true)` — every GL draw in that capture context is an
+  animator composite; nothing else uses GL_INT attribs there.
+- The DMA publish loop, the fixed anim arrays (bomb, cas-conveyor, security, waterfalls,
+  lava, stadiumb, fort-pris/warp, metkor, shield, krew-holo) and slime are re-enabled for
+  jak2, replacing the black placeholders with real composited pixels.
+- Kill switches for A/B on HW (pattern of `gk_dkgl_noclouds.txt`):
+  `sdmc:/switch/jak2/gk_dkgl_nodmatex.txt` restores the DMA publish ban;
+  `sdmc:/switch/jak2/gk_dkgl_noanim.txt` restores the fixed-arrays+slime ban
+  (skull gem always runs).
+- New diagnostic: `[texanim] publish tbp=<tbp> <w>x<h>` logged once per published tbp
+  (cap 60) — on a good HW run these appear for the tickers' tbps (1670/1672/1448/1982)
+  and the `[sprtex] MISS` lines for them stop.
+
+**HW test:** roam Haven City + the gun course. Expect tickers scrolling with real art,
+Krew/baron signs colored, destructible walls with proper damage colors, and the gun
+course music/announcer staying in sync with its timer. Watch `[texanim] publish` lines
+appearing, `[sprtex] MISS` dropping, `[aud] 10s` deltas ≈ 10.0 s, and the SDL open line
+now reading `samples=2048 size=8192`. If any re-enabled array misbehaves visually, drop
+the matching kill-switch file on the card and re-test — then that array gets its own
+opt-out instead of the blanket ban.
+
+
+## FIX 122 — HW verdict on FIX 121 + targeted probes for the survivors (2026-11-18, AI-assisted)
+
+**HW verdict (2026-11-18, user, f121 = `13bfa1de...`):** the moving city textures
+(ticker tapes etc.) now show real colours; the audio **desync is cured** — every
+`[aud] 10s` delta in the f121 session is 9.98–10.03 s wall time, even during gunfire
+(pre-fix it drifted up to +10.72 s per 10 s). Still broken: the destructible walls /
+dead-town falling bridge (black), and some shot sounds missing in the gun course.
+
+**What the f121 log actually says (session starts at line 39414, samples=2048):**
+- Tickers/Krew sign/propaganda logo: **zero MISS** — fixed by the fixed-arrays path
+  (`[texanim] fixed` codes: skull-gem, bomb, cas-conveyor, security, waterfall, lava,
+  stdmb-energy-wall, krew-holo, ...). The old "expect publishes at tbps
+  1670/1672/1448/1982" prediction was wrong: the generic DMA publish loop only ever
+  published the two sky tbps (0/128, at 6.8–7.0 s, boot).
+- Still MISSing all session: `gungame-sprite/gen-01..04`, `meta-01..04` (gun course,
+  tbps 2034–2298), `hiphog-spritehiphog-neon-*` letters, `ctyport-...hiphog-exterior-*`,
+  `ctysluma-spritebaron-neon-*`. These are NOT in any C++ fixed def and NOT in the
+  extractor's `animated_textures` list (`decompiler/config/jak2/ntsc_v1/inputs.jsonc`,
+  100 names) — they are plain static textures inside `gungame.fr3` / `hiphog.fr3`
+  (fr3 files are 8-byte-header + **zstd**; `strings` on the compressed file finds
+  nothing — decompress first: `tail -c +9 X.fr3 > x.zst && zstd -d`).
+- Audio: the desync is gone but there is a **retrigger storm**: `plays 2730, limit 2468`
+  per 10 s, `top rejected: bank ctywid1 sound 16 x2210` (~220 plays/s of one sound,
+  also x599 cut-off) while `live` stays 0–19. During the gun course window itself
+  (169–227 s) the storm stops (`limit` 0–6), so the missing shot sounds are NOT the
+  handler limit there — a different mechanism, unproven. This storm predates f121
+  (same sound 16 storming in the 2026-11-16 log).
+
+**FIX 122 (this build, NRO md5 `7ff7b42a47c084603ebd3e04bcdf572b`, deployed as
+`jak2.nro`, f121 rotated to `jak2.nro.bak-13bfa1de...`): pure diagnostic pass, no
+behaviour change.**
+1. `player.cpp`: the `[aud] 10s` line gains `instant N` — handlers that finished
+   less than 24 ticks (~0.1 s) after starting, counted per bank/sound, printed as
+   `[aud]   top instant-death: bank %s sound %u (NAME) x%d`. Every `top rejected` /
+   `top cut-off` line now also prints the sound NAME (reverse lookup in
+   `SFXBlock::Names`). If the storm sounds die at birth this names them; if gunshot
+   handlers die at birth we'll see the gun bank there instead.
+2. `TextureAnimator.cpp`: once-per-tbp/cbp traces (cap 60 each) of the whole generic
+   DMA path, all to `gk_run_log.txt`: `[texanim] upload tbp fmt f2g`
+   (handle_generic_upload), `[texanim] clut cbp` (clut-16-16), `[texanim] erase tbp
+   WxH` (handle_erase_dest), `[texanim] draw dst` (handle_draw), `[texanim] nongpu
+   tbp kind` (publish-loop entries that stay CPU-side — the CLUT16 conversion HACK),
+   and `[texanim] fixed NAME` (which fixed arrays GOAL actually requests, cap 20).
+   Cross-referencing these against the surviving `[sprtex] MISS tbp` lines shows
+   exactly which stage each still-black page dies at: never uploaded / uploaded but
+   never erased+drawn / drawn but stuck non-GPU / never requested by GOAL at all.
+
+**Next HW test (same card swap):** boot, roam the city past the destructible walls,
+dead town (falling bridge), then the scatter gun course firing often. Then read
+`gk_run_log.txt`'s LAST session: (a) does any `[texanim] upload/erase/draw` line show
+tbp 2034–2298 or the hiphog pages? (b) does `top instant-death` name the ctywid
+storm sound and/or the gunshot? (c) does `[texanim] fixed stdmb-energy-wall` appear
+(shooting the gun-course energy walls)? The answers pick the next real fix: GOAL
+never sends those pages (loader/upload-bucket issue), sends them but the animator
+drops them (publish HACK to relax), or the sounds die at birth (grain/voice issue).
+
+## FIX 123 — f122 HW verdict + id/forensics probes (2026-11-18, AI-assisted)
+
+**HW verdict (2026-11-18, user, f122 = `7ff7b42a...`, session at log line 40844):**
+1. **GOAL never sends any texanim DMA for the still-black pages.** All session the
+   generic path only ever sees the two sky pages (`upload tbp=0`, `tbp=128`,
+   `publish tbp=128 256x1`, one clut at 192) and the fixed arrays requested are just
+   skull-gem/bomb/security. The black pages are plain pooled textures: their tbp
+   slots are expected to be linked by `handle_upload_now` (the runtime
+   upload-now!/chain-replay path), not by the animator. That part of the old
+   hypothesis is confirmed dead.
+2. **Every MISS line prints a texture NAME (not "no-page")** — so `handle_upload_now`
+   DID run for those tbps and linked them, but to a `GpuTexture` that is a
+   **permanent placeholder** (`give_texture` clears placeholders, `TexturePool.cpp:138`,
+   so a surviving placeholder means the loader never gave that PcTextureId, or gave it
+   under a different id, or unloaded it again). Timeline proof: the gungame level load
+   finishes at 190.253 ("loader finished pending loads in 302.2 ms") and gen-02/meta-01
+   MISS *continuously* 190.356 → 202+ — loading the owning fr3 does NOT heal it.
+3. **Extraction is provably fine** (parsed the fr3s offline, serializer-faithful):
+   `gungame.fr3` `gungame-sprite` page **2405**, tex 0..16 complete, no gaps
+   (cita 0-5, gen 6-8, gold 9-12, meta 13-16), all pool=1 fmt=BC3. `hiphog-sprite`
+   page **998** (neon letters tex 36-67), `ctysluma-sprite` page **1021**,
+   `ctyport-sprite` page **1325**. `load_to_pool=false` only exists for
+   animated_textures in the common path (`extract_level.cpp:414`), so the loader
+   gives all of these when the level file loads. Remaining suspects: the runtime
+   tpage that draws them has a **different id or tex index** than the extraction
+   (link ≠ give), or the give/unload ordering kills it.
+4. **Audio: positional/ambient sounds die within 24 ticks of starting.** In the
+   gun-course window the plays are there (`plays 278`/10 s) but `instant 190`:
+   gunshots, `WATER_DROP` x159/10 s (course), `STEAM_VENT` (city), `RUINS_AMB_LOW`
+   x117 (dead town), footsteps NORMAL_HEEL/GIRL_HEEL x90-98. The retrigger storms
+   are a *consequence* (GOAL ambient processes are play→wait→replay loops; each play
+   dies at birth, so they re-fire every frame). Music/MIDI (different handler class)
+   plays fine. Not the instance limit (limit stays 0-9 in the course).
+
+**FIX 123 (this build, NRO md5 `68b325d21c0551716d21faee9d5164e9`, deployed as
+`jak2.nro`, f122 rotated to `jak2.nro.bak-7ff7b42a`): pure diagnostics, no
+behaviour change.**
+1. `blocksound_handler.{h,cpp}` + `sfxgrain.cpp`: every handler records
+   `m_last_grain_type` (last GrainType executed; **STOP=24** means the sound program
+   branched to its own stop grain — a bank-data cull decision) and `m_had_voice`
+   (whether a VAG voice ever started).
+2. `player.cpp`: per instant-death up to 2 full snapshots:
+   `[aud] instant BANK#id (NAME): ticks= grains= next= last= voice= paused= appvol=
+   curvol= pan= countdown= reg=`. `top instant-death` is now top-3 (f122 had several
+   distinct populations and top-1 hid all but the biggest).
+3. `dk_renderer.cpp`: `[sprtex] MISS tbp=… pc=PAGE/TEX` — the runtime-linked
+   PcTextureId, to compare directly with the fr3 combo ids (gen-02=2405/7,
+   meta-01=2405/13, hiphog-neon-on=998/64, ctyport signs=1325/xx). The upload-now
+   queue now LOGS drops (`[dk] tex op queue FULL`, cap 512) instead of dropping
+   silently — a blackout load without chains flowing could unlink a level's tbps
+   invisibly.
+4. `TexturePool.cpp`, only for pages 998/2405/1021/1325 (so the log stays small):
+   `[pool] link tbp= -> pc P/T` (handle_upload_now, runtime side), `[pool] give P/T`
+   (loader side), `[pool] placeholder-new P/T` (link before give), `[pool] unload
+   P/T` (entry going placeholder again).
+
+**Next HW test:** city → hip hog bar (interior NEON letters) → baron sluma signs →
+gun course firing often → dead-town bridge. Then read the LAST `gk_run_log.txt`
+session and match every `[sprtex] MISS pc=2405/x` against `[pool] give 2405/x`, and
+every `[aud] instant … last=24` against its appvol. Verdict table:
+(a) give 2405/x present + MISS pc=2405/x persists → placeholder healed but slot
+stale (refresh_links seam) or give→unload churn; (b) link shows a different page/tex
+than the fr3 → runtime tpage id/index mismatch, fix the mapping (name-based link or
+follow the GOAL upload-now recreation); (c) no give at all → loader never loaded the
+file/texture (want-levels list); (d) `[aud] instant … last=24 appvol≈0` → plays come
+in at ~zero volume (GOAL ear/distance math); last=24 with normal appvol → find what
+stops the handler; last=1 voice=0 → VAG voice never survived (synth path).
+
+## 2026-11-18 — UPSTREAM SYNC (AI-assisted, Cline): 10 upstream fixes cherry-picked; NOT yet deployed
+
+Branch `deko3d-migration`. Added `upstream` remote (open-goal/jak-project); fork
+history is fully rewritten so there is **no merge-base** — picks are by SHA from
+identified base `a42c07199` (2026-09-10). Delta was 38 commits; **10 picked**:
+
+- `6206e74ca` draco cmake install path · `dcf31a96e` extraction workers capped to
+  hw concurrency · `b1bd559bc`/`4075e9095` goalc/extractor default arm64 on ARM
+  (Switch pipeline unaffected: `package-switch.sh` passes `--instruction-set arm64`)
+- `97002122a` Windows REPL WSA_IO_PENDING · `da7fc00dc` GlowRenderer probe depth
+  format (GL-only, dead on deko3d — but note our T126 glow-probe port may share
+  the same depth-format-lost-on-resize bug class; worth an eyeball someday)
+- GOAL fixes (**land in `data/out/jakN/obj`, NOT in the NRO**): `6059ab859` jak1
+  hint subtitles (`game_subtitle.gp` is v1; goalc marks it V1, converter now sets
+  `merge=false`) · `7eb72fd2f` jak3 speedruns `logior!` (resolved conflict: kept
+  OUR category set, fixed our two hero-mode blocks) · `75a4211f1` jak3 Onin Tent
+  minimap icon · `8355ed9a1` jak3 glider/sniper-turret relocate crash (duplicate
+  commented out; original verified in `engine/common-obs/generic-obs.gc:3319`).
+
+Skipped on purpose: `31c37336` jak2 language menu (our `set-language` rpc in
+`progress-static-pc.gc` is the same fix, better), CI/docs/dep bumps, jakx decomp
+batches + decompx tooling, SFX extraction feature, TOD GLB feature, `-nosound`
+removal (touches our Switch-modified kmachine).
+
+**Deploy state: none of these are on the card.** Card NROs predate the picks:
+jak1.nro 16/11, jak2.nro today (f122 diag build, before the picks), jak3.nro
+10/10. To ship: rebuild host tools (done, `build-host` goalc+gk clean), re-run
+the per-game ARM64 data compile (new binaries — subtitle fix is in the compiler),
+`GAME=jakN scripts/package-switch.sh`, deploy whole `switch/jakN/` tree (NRO
+**and** `data/` — the GOAL fixes are data-side; NRO-only swap ships nothing
+user-visible). Users must keep `switch/jakN/OpenGOAL/` saves when swapping.
+
+
+
+
+## 2026-11-19 — FIX 123 HW VERDICT (AI-assisted, Cline): black walls = OUR Loader evicts pages still drawn; audio FIXED; perf NOT worse; white-box Jak = same root cause
+
+Card md5 confirmed f123 (`68b325d21c0551716d21faee9d5164e9`). Log session
+starts at line 42374 of `gk_run_log.txt` (379 s tour). User: audio FIXED,
+black walls still there, new transient white-box-Jak in dead city / pumping
+station, "did probes make perf worse?"
+
+**Audio: fixed, case closed unless it regresses.** The 80 `[aud] instant`
+snapshots that remain are benign populations: 57/80 have `appvol=0` (GOAL
+ear/distance cull — the sound program stops itself, `last=-1`, normal) and the
+rest are voice-limit rejections during gungame retrigger storms
+(`plays 2033 limit 1797 instant 234` per 10 s — the limit counter is high but
+sounds survive; pre-f121 the same storms showed `instant 888` with silence).
+The f121 audio-clock fix is the healed path (see memory entity).
+
+**Black walls: verdict (a), second half — give→unload churn, and the unload
+is OURS, not GOAL's.** Per-page timeline in the f123 session:
+- ctysluma 1021: `placeholder-new` t≈9.4 → `give` t≈10.8 → works → **mass
+  `unload` t=35.619 (78 pages)** → `MISS tbp=930 pc=1021/9` at t=105.9+.
+- hiphog 998 / ctyport 1325: `give` t≈35.5 → works → unload t=177.8.
+- gungame 2405: `give` t=56.6 → **walls textured, zero MISS for 120 s** →
+  user re-enters the course at t=176.9 (blackout load; `[pool] link
+  tbp=20xx -> pc 2405/x` re-link + GOAL upload-now at 176.884) → 0.9 s later
+  **t=177.799 the Loader unloads 2405/0-16 + 1325 + 998 (111 pages)** →
+  `MISS 2405/7, 2405/13` continuously from t=178.7 to the end of the log.
+  So the pages load fine, survive the whole first visit, and are then killed
+  by a level-cache eviction and never re-given ("no give follows a same-level
+  unload", TexturePool.cpp:243).
+
+`pc=` values match the fr3 combo ids exactly (2405/7, 2405/13, 998/xx,
+1021/x, 1325/19) — runtime id/index mapping is CORRECT; verdicts (b) and (c)
+are dead. `[dk] tex op queue FULL`: 0 hits — the upload-now queue never
+dropped anything.
+
+Who unloads: `Loader::unload_level_gpu_objects` (Loader.cpp:1703) calls
+`tex_pool.unload_texture` for every pool texture of an evicted cached level.
+The Switch branch of the level-cache picker (Loader.cpp ~1650) evicts
+prefetch-resident levels that are no longer active/desired — this fires often
+under the Switch memory cap, while the desktop policy (180-frame grace, only
+over m_max_levels) almost never does. On the PS2 none of this matters because
+texture pages are streamed per frame by the proximity masks
+(`upload-textures`, texture.gc:1768) regardless of level-object lifetime —
+"unloading" a page on PS2 just frees the VRAM slot bookkeeping; the data
+stays and is re-uploaded whenever in view. Our port gave the pool static
+per-level data, so when the owner level is evicted the tbps still drawn by
+the ACTIVE level's sprites go placeholder forever.
+
+**White-box Jak = same root cause, different renderer.**
+`unload_texture` flips the entry back to `is_placeholder` and
+`refresh_links` re-points every linked tbp at `m_placeholder_texture_id`
+(TexturePool.cpp:223/263/408) — a 16×16 gray/white **checkerboard**
+(`0xa0303030`/`0xa0e0e0e0`, TexturePool.cpp:444-452). The sprite path
+skips on placeholder (`dk_sprite_lookup` → 0 → batch skipped → **black
+walls**), but the merc path (dkgl bind → pool resolve → placeholder id)
+*draws* it — Jak's model textured with the stretched checkerboard reads as a
+**white box**. Dead city / pumping station are the heaviest streaming scenes,
+so their level evictions catch Jak's art pages; the punch makes the
+placeholder page visible for ~1 s until the animator/clut blender republishes
+(also matches the dk_renderer.cpp:216 comment "the punch-spark suspect").
+Not a new bug — fix the eviction and both symptoms should go together.
+**Probe gap:** `[pool]` probes only cover 998/2405/1021/1325 and there is no
+MISS probe on the merc/dkgl resolve seam, so Jak's page wasn't traced — this
+session never visited dead city/pump station anyway.
+
+**Performance: did NOT get worse** (f123 vs all earlier sessions in the same
+log; different builds, rough scene mix):
+- gpu world avg 11.24 ms (max 15.35) vs 11.47 (max 23.6)
+- slow frames ~12 per 600-frame pass vs ~17.6
+- frame components: capture 4.17 vs 4.71, build 1.25 vs 1.45 (both BETTER);
+  gpufence 4.74 vs 4.16, inwait 0.49 vs 0.26 (both idle waits, not cost);
+  total 16.16 vs 16.05 ms of the 16.7 budget.
+- The [sprtex] MISS probe is rate-limited in code (first 40 + every 600th)
+  and per-frame cost is a lookup + counter; 2126 log lines in 261k. Negligible.
+
+**FIX 124 directions (pick next session):**
+1. **Simplest:** on the dk path skip the `tex_pool.unload_texture` loop in
+   `unload_level_gpu_objects` — keep evicted levels' pool textures alive.
+   Cost: pool memory stops recycling (`tex live=1849 mem=79.5 MB freed=1726`
+   at session end — freed=1726 is how much the current behavior recycles;
+   dktexgpu P8 means image-bump memory never returns, so a long session would
+   grow until the img memblock fails — needs a cap or real LRU as follow-up).
+2. **PS2-semantics:** draw-stamp each tbp at lookup time (dk_sprite_lookup +
+   dkgl resolve seam); `unload_texture` defers pages stamped within the last
+   N frames and retries them once idle. Evictions then only land on pages
+   truly not drawn — exactly what the PS2 did with VRAM.
+3. **Loader policy:** refuse to evict a cached level whose pool pages were
+   drawn recently (same draw-stamp set, checked in the Switch picker).
+Also add the merc-side placeholder probe (rate-limited `[merctex]` naming
+tbp/page at the dkgl resolve seam) and `[pool] unload` logging for any page
+while still linked, so the white-box events become visible in the log.
+
+**Still open:** intro FMV low fps — grep `MoviePlayer|bink|mpeg|avcodec`
+found nothing; next attempt: GOAL-side `*movie*` handlers, `play-movie`,
+streaming/decoder in `goal_src/jak2/`.
+
+## FIX 124 — IMPLEMENTED: draw-stamp deferred unload (option 2, PS2 semantics) (2026-11-19, AI-assisted, Cline)
+
+**Root cause recap (FIX 123 HW verdict):** black walls / white-box Jak after
+area transitions = `Loader::unload_level_gpu_objects` calls
+`TexturePool::unload_texture` on pages the *active* level still draws; nothing
+re-gives them, so the tbp renders placeholder/black forever. The PS2 never did
+this: it only evicted far levels' pages and the EE re-uploaded what it needed.
+
+**What landed (option 2, not the option-1 "never unload" — that hits P8
+unbounded image-memory growth):**
+
+1. `TexturePool.h/.cpp` — `GpuTexture::last_draw_frame` (u64 draw stamp) +
+   FIX 124 API: `tick_frame()` (clock, render thread, once/frame),
+   `note_draw_id()` (per-id stamps, fixed `[4096]` array = dktexgpu store
+   kMaxTexImages), `unload_texture_if_idle()` (= `unload_texture` unless the
+   page was drawn within `m_defer_frames`; then queue + dedup by gpu_id),
+   `retry_deferred_unloads()` (mirrors unload_texture's teardown:
+   find_if-by-gl, erase, empty→placeholder, `refresh_links`). Stamps are
+   written in `lookup()` + `lookup_mt4hh()` (lockless render-thread u64
+   stores, same pattern the header already documents).
+2. dkgl bind seam — merc/Generic2 bind raw `lev->textures` dktexgpu ids with
+   NO tbp lookup, so they'd never be stamped. Added
+   `dkgl::set_pool_draw_stamp_hook` / `note_pool_draw` (dkgl_state.h/.cpp),
+   installed in `dkgl::init` (dkgl_frame.cpp, raw pool ptr, dk_renderer
+   outlives dkgl), called from the dkgl_draw.cpp unit loop pool-path branch
+   (`dk_id = gl_id; else` arm). Null hook on host/stub = no-op.
+3. `Loader.cpp` — `unload_level_gpu_objects` now builds a `freed_now` list:
+   pool ids released *now* (idle) go to the garbage queue as before; deferred
+   ids are NOT queued (that was the actual bug). `Loader::update` drains
+   `retry_deferred_unloads` each frame (pool mutex) and pushes released ids
+   into `m_garbage_textures` → existing paced delete. Desktop (defer 0) is
+   byte-for-byte the old behavior.
+4. `dk_renderer.cpp` — `dk_loader_start` sets defer window **120 frames**
+   (~2 s at 60 fps); **kill switch `gk_dkgl_nopooldefer.txt`** in
+   `sdmc:/switch/<game>/` restores the old behavior (same access() flag
+   pattern as gk_dkgl_noworld.txt). `tick_frame()` runs once per frame in the
+   render loop, before the loader update/`update_blocking` block.
+
+**Probes:** `[pool] FIX124 defer unload page/tex (drawn N frames ago, M
+queued)` — rate-limited first-40 + every-600th (sprtex pattern);
+`[pool] FIX124 deferred unload done` on probe pages;
+`[loader] FIX124 pool defer: freed N tex, M still held` while work is
+outstanding. On hardware with the bug, the black-wall/white-box pages should
+now appear in the `defer unload` log instead of going black.
+
+**Threading (verified before writing):** stamps + tick + deferral checks +
+retries all run on the render thread (lookups/binds happen during bucket
+recording; `Loader::update` is called from the dk render loop, T49 comment).
+`handle_upload_now` (game EE thread) touches different fields under the same
+mutex; a torn aligned u64 is impossible. So no new locks.
+
+**Gate:** `check-dk.py` PASS (44 files, 0 errors, 1 pre-existing warning);
+docker jak2 NRO build clean 69/69, **md5 80ff1eb38c2eb8eb4c613a369a8f5d81**
+(build-switch-jak2/game/gk.nro). No new warnings (the 4 grep hits are
+pre-existing lines: Loader.cpp:188 reorder, dkgl_draw.cpp:556/557,
+dkgl_frame.cpp:2640).
+
+**Deploy:** DONE (2026-11-19) — SD card was mounted. `build-switch-jak2/game/gk.nro`
+(16,520,811 B, md5 80ff1eb38c2eb8eb4c613a369a8f5d81) copied to
+`/Volumes/SWITCH SD/switch/jak2/jak2.nro`, card md5 re-verified identical; prior
+build rotated to `jak2.nro.bak-1993b908` BEFORE the copy, then `sync`. A/B test =
+create `gk_dkgl_nopooldefer.txt` on the card to fall back without redeploying.
+Expect: during a real area transition the defer log shows a handful of pages held
+~120 frames then released — if it shows hundreds held continuously or `tex live`
+keeps climbing over a long session, shrink the window or move to option 3.
+
+**Not done / follow-ups:** `[merctex]` placeholder probe deferred (the defer
+log already names suspect pages via tex_probe_page); option 3 (evict far
+levels only) not needed unless the 120-frame window proves too generous.
+

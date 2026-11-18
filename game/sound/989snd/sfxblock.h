@@ -23,11 +23,11 @@ class SFXBlock : public SoundBank {
     static constexpr u32 SFX_INSTLIMIT_VOL = 0x10;
     static constexpr u32 SFX_INSTLIMIT_TICK = 0x20;
 
-    bool has_loop() { return flags & SFX_LOOP; }
-    bool solo() { return flags & SFX_SOLO; }
-    bool has_instlimit() { return flags & SFX_INSTLIMIT; }
-    bool instlimit_vol() { return flags & SFX_INSTLIMIT_VOL; }
-    bool instlimit_tick() { return flags & SFX_INSTLIMIT_TICK; }
+    bool has_loop() const { return flags & SFX_LOOP; }
+    bool solo() const { return flags & SFX_SOLO; }
+    bool has_instlimit() const { return flags & SFX_INSTLIMIT; }
+    bool instlimit_vol() const { return flags & SFX_INSTLIMIT_VOL; }
+    bool instlimit_tick() const { return flags & SFX_INSTLIMIT_TICK; }
   };
 
   struct SFX {

@@ -115,7 +115,8 @@ void set_golden(std::string* out);
 // Switch: after `frames` frames with tfrag data, write <dir>/dk_replay.dma (that frame's
 // DMA chain) and <dir>/dk_replay.golden.txt (that frame's golden). One shot.
 void arm_replay_dump(const char* dir, int frames);
-// AI-assisted: jak2 occlusion string of the level for this pass (see TFragmentDk.cpp), or nullptr.
+// AI-assisted: gen-2 (jak2/jak3) occlusion string of the level for this pass (see
+// TFragmentDk.cpp), or nullptr.
 const uint8_t* occlusion_string(int pass);
 
 // deko3d side (dk_tfrag_record.cpp): record frame_draws() into dkdev::cmd_handle().
@@ -124,12 +125,13 @@ void record_world(int fb_w, int fb_h);
 
 // ---- §7.2 phase 1 (AI-assisted): per-game bucket tables ----
 // The pass tables live in the .cpp (jak1: 8 buckets incl. dirt/ice/sky-blend; jak2: per
-// level 0..5 one TFRAG_L{n}_TFRAG (NORMAL) + one TFRAG_T_L{n}_ALPHA (TRANS) bucket, GL
-// GET_BUCKET_ID_FOR_LIST order). Default = jak1, safe before set_game; dk_renderer calls
-// set_game at boot, before the first capture_chain. Switch + host replay.
+// level 0..5 one TFRAG_L{n}_TFRAG (NORMAL) + one TFRAG_T_L{n}_ALPHA (TRANS) bucket; jak3
+// (J3): per level 0..9 the same pair, GL GET_BUCKET_ID_FOR_LIST order). Default = jak1,
+// safe before set_game; dk_renderer calls set_game at boot, before the first
+// capture_chain. Switch + host replay.
 // (GameVersion is forward-declared at global scope above, where versions.h defines it.)
 void set_game(GameVersion v);
-// Capture passes of the active game (jak1: 8, jak2: 12). DrawCmd::range indexes these.
+// Capture passes of the active game (jak1: 8, jak2: 12, jak3: 20). DrawCmd::range indexes these.
 int pass_count();
 // Switch only: record just one range's draws at its GL bucket position. jak1 keeps using
 // record_world (one call, whole list); record_jak2_dkgl interleaves the record_pass calls

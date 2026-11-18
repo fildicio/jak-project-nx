@@ -717,6 +717,11 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
       }
     } else {
       dk_id = gl_id;  // pool path: the binding IS a raw dktexgpu id
+      // FIX 124 (AI-assisted): tell the pool this id is being drawn. These
+      // binds never go through lookup(tbp), so without the stamp the pool
+      // could unload a page an active level still draws -- the black-wall /
+      // white-box-Jak symptom after area transitions.
+      note_pool_draw(gl_id);
     }
     if (texture_needs_barrier(gl_id)) {
       e->barrier_before_sample();

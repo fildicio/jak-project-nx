@@ -53,10 +53,12 @@ struct Captured {
   std::vector<u8> proto_mask;  // jak2: hidden proto names (dk_proto_vis.h)
   bool valid = false;
 };
-// §7.2 phase 1: per-game bucket pick (defaults to jak1, like dkgl_frame.cpp).
+// §7.2 phase 1 (jak2) / J3 (jak3): per-game bucket pick (defaults to jak1, like
+// dkgl_frame.cpp). s_jak2_style = the gen-2 DMA shape (jak2 AND jak3): proto-vis packet
+// after the pc data, frustum shrub culling, no CALL head.
 const int* s_buckets = dkshrub::kJak1Buckets;
 int s_pass_count = dkshrub::kNumPasses;
-bool s_jak2 = false;
+bool s_jak2_style = false;
 std::unordered_map<const tfrag3::ShrubTree*, dkprotovis::Cache> s_pv;
 Captured s_cap[dkshrub::kMaxPasses];
 dktf::FrameDraws s_frame;
@@ -78,8 +80,9 @@ bool walk_bucket(const void* data, uint32_t slot, uint32_t next, Captured* out) 
   memcpy(&out->pc, pc.data, sizeof(TfragPcPortData));
   out->pc.level_name[11] = '\0';
   out->proto_mask.clear();
-  if (s_jak2 && d.current_tag_offset() != next) {
-    // GL Shrub::render: jak2 sends the proto-vis mask right after the pc-port data.
+  if (s_jak2_style && d.current_tag_offset() != next) {
+    // GL Shrub::render: the gen-2 games (jak2, jak3) send the proto-vis mask right after
+    // the pc-port data.
     auto mask = d.read_and_advance();
     dkprotovis::copy_mask(mask.data, mask.size_bytes, &out->proto_mask);
   }
@@ -316,9 +319,9 @@ void capture_chain(const void* data, uint32_t start_offset) {
   }
   DmaFollower d(data, start_offset);
   uint32_t buckets_base;
-  if (s_jak2) {
-    // §7.2 phase 1: jak2 chains have no CALL head -- the bucket table starts at the
-    // offset itself (GL dispatch_buckets_jak2).
+  if (s_jak2_style) {
+    // §7.2 phase 1 (jak2) / J3 (jak3): gen-2 chains have no CALL head -- the bucket table
+    // starts at the offset itself (GL dispatch_buckets_jak2 / dispatch_buckets_jak3).
     buckets_base = d.current_tag_offset();
   } else {
     if (d.current_tag().kind != DmaTag::Kind::CALL) {
@@ -408,7 +411,8 @@ void build_frame(Loader* loader) {
                             std::chrono::steady_clock::now() - t0)
                             .count());
       }
-      const bool cull = s_jak2 && shrub_cull_enabled();  // jak1 keeps drawing every chunk
+      const bool cull =
+          s_jak2_style && shrub_cull_enabled();  // jak1 keeps drawing every chunk
       groups.resize(tree.static_draws.size());
       if (idx.size() < ic.sorted.size()) {
         idx.resize(ic.sorted.size());
@@ -435,7 +439,7 @@ void build_frame(Loader* loader) {
       memcpy(ring->pb.cpu + base, idx.data(), bytes);
       ring->used += (bytes + 255) & ~255u;
       const std::vector<u8>* pv = nullptr;
-      if (s_jak2) {
+      if (s_jak2_style) {
         pv = &dkprotovis::update(&s_pv[&tree], ld->load_id, tree.proto_names,
                                  s_cap[b].proto_mask);
       }
@@ -475,12 +479,22 @@ void build_frame(Loader* loader) {
   tod_evict_unused();
 }
 
-// ---- §7.2 phase 1 (AI-assisted): per-game bucket tables ----
+// ---- §7.2 phase 1 (jak2) / J3 (jak3): per-game bucket tables ----
 
 void set_game(GameVersion v) {
-  s_jak2 = v == GameVersion::Jak2;
-  s_buckets = s_jak2 ? kJak2Buckets : kJak1Buckets;
-  s_pass_count = s_jak2 ? kJak2NumPasses : kNumPasses;
+  // J3: jak3 shares jak2's shrub DMA shape (proto-vis packet, no CALL head), so the
+  // gen-2 flag covers both.
+  s_jak2_style = v == GameVersion::Jak2 || v == GameVersion::Jak3;
+  if (v == GameVersion::Jak3) {
+    s_buckets = kJak3Buckets;
+    s_pass_count = kJak3NumPasses;
+  } else if (v == GameVersion::Jak2) {
+    s_buckets = kJak2Buckets;
+    s_pass_count = kJak2NumPasses;
+  } else {
+    s_buckets = kJak1Buckets;
+    s_pass_count = kNumPasses;
+  }
 }
 
 int pass_count() {

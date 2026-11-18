@@ -69,6 +69,13 @@ struct Emitter {
                                  bool linear) {
     (void)dk_tex_id, (void)src, (void)dst, (void)linear;
   }
+  // §7.2 half-res sky (AI-assisted): the reverse direction -- a dkgl offscreen image
+  // composited INTO the frame target (the half-res sky pass). Queued like blit_frame_to_tex:
+  // end the list, blit at record time, continue on the same target. The host mock ignores it.
+  virtual void blit_tex_to_frame(u32 dk_tex_id, const DkImageRect& src, const DkImageRect& dst,
+                                 bool linear) {
+    (void)dk_tex_id, (void)src, (void)dst, (void)linear;
+  }
   // T129a (AI-assisted): glGenerateMipmap on a dkgl texture (TextureAnimator) -- queue
   // level L-1 -> L downsample blits inside the same DkImage. w/h = the level-0 rect,
   // the replay halves it per level. The host mock ignores it by default.
@@ -386,6 +393,16 @@ void pending_target_consumed();
 // `unit`: a sampler object bound there wins over the texture's own params.
 constexpr u32 kSamplerCombos = 32;  // == dk_device.cpp kDkglSamplerCount
 u32 texture_sampler_combo(u32 unit, u32 gl_id);
+
+// FIX 124 (AI-assisted): pool draw-stamp seam. dkgl draws bind raw dktexgpu
+// pool ids (the Loader's lev->textures: merc/Generic2, and DirectRenderer's
+// sprite pages) that never go through TexturePool::lookup(tbp), so the pool
+// cannot tell they are still being drawn. dkgl::init installs a forwarder and
+// the draw path calls it for every pool id it binds; a null hook (host tests,
+// init skipped or failed) makes this a no-op.
+typedef void (*PoolDrawStampFn)(u64 gpu_id);
+void set_pool_draw_stamp_hook(PoolDrawStampFn fn);
+void note_pool_draw(u64 gpu_id);
 
 #if defined(__SWITCH__)
 // dkgl_glad.cpp: overwrite the dk_gl_census no-op stubs for the dkgl subset. The

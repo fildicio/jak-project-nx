@@ -61,6 +61,12 @@ bool record_bucket(int bucket);
 // recorded after the last world pass so it covers the HUD too.
 void set_pmode_alp(float alp);
 bool record_blackout();
+// J7 (AI-assisted): ONE slot-fence signal per frame (call from the world recorder after
+// its last record_* call) instead of one per bucket -- a signalFence ctrl command both
+// splits the frame stream into an extra host-gpfifo entry and makes the queue emit a
+// syncpt/semaphore burst; per bucket that flooded the 0x800-entry kernel gpfifo ring
+// (0xd5c kickoff failures on heavy jak3 frames).
+void record_frame_fence();
 // T125 (AI-assisted): the UNCHANGED GL TextureAnimator (jak2 skull gems etc.) through dkgl.
 // Dispatched from the SpriteDk tex-bucket walk at PC_PORT imm-12, inside
 // capture_begin/capture_end; begin/end bracket one handle_texture_anim_data call (its GL

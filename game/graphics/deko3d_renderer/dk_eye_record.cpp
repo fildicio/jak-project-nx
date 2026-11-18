@@ -17,7 +17,7 @@ void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)))
 namespace dkeye {
 namespace {
 
-constexpr uint32_t kTexImages = 2048;  // dktexgpu descriptor slots
+constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (store slots, dktexgpu descriptor slots)
 
 const DkVtxAttribState kEyeAttribs[] = {
     {0, 0, 0, DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},

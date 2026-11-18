@@ -11,6 +11,7 @@
 
 #include "common/dma/dma_chain_read.h"
 #include "common/dma/gs.h"
+#include "common/versions/versions.h"  // J3 (jak3 bringup): set_game corner-order pick
 
 #include "game/graphics/deko3d_renderer/TFragmentDk.h"
 #include "game/graphics/deko3d_renderer/dk_buffer_pool.h"
@@ -48,6 +49,7 @@ AnimFn s_anim = nullptr;      // T125: PC_PORT imm-12 -> texture animator
 GlowFn s_glow = nullptr;      // T126: jak2 glow section -> GL GlowRenderer via dkgl
 DistortFn s_distort = nullptr;  // T127: jak2 distort section -> GL distorter via dkgl
 bool s_jak2 = false;          // §7.2 particles: walking GL Sprite3::render_jak2's layout
+bool s_jak3 = false;          // J3 (jak3): flag&0x30 corner order (GL Sprite3 render_2d)
 
 void init_default_mode() {
   s_default_mode = DrawMode();
@@ -155,8 +157,27 @@ void do_block(uint16_t mode, uint32_t count, const SpriteVecData2d* vec, const A
     v.info[3] = mode;
     // GL corner order 0, 1, 3, 2 (PC swaps the last two for the strip).
     static const uint16_t kCorner[4] = {0, 1, 3, 2};
+    // J3 (AI-assisted, jak3): GL Sprite3 render_2d re-maps the corner order from the
+    // sprite flag bits 0x30 ("note that PC swaps the last two vertices", Sprite3.cpp).
+    // 0x10 is the default 0,1,3,2; 0x20 -> 3,2,0,1; 0x30 -> 2,3,1,0 (GL's "// 2, 3, 0, 1"
+    // comment does not match its own code -- port the code, not the comment).
+    static const uint16_t kCornerJak3Flag20[4] = {3, 2, 0, 1};
+    static const uint16_t kCornerJak3Flag30[4] = {2, 3, 1, 0};
+    const uint16_t* corner = kCorner;
+    if (s_jak3) {
+      switch (vd.flag() & 0x30) {
+        case 0x20:
+          corner = kCornerJak3Flag20;
+          break;
+        case 0x30:
+          corner = kCornerJak3Flag30;
+          break;
+        default:
+          break;  // 0x00 / 0x10: the default order
+      }
+    }
     for (int k = 0; k < 4; k++) {
-      v.info[2] = kCorner[k];
+      v.info[2] = corner[k];
       s_verts.push_back(v);
     }
   }
@@ -423,6 +444,13 @@ uint64_t frag_params(Slot* s, float amin, float amax) {
 }
 
 }  // namespace
+
+// J3 (AI-assisted, jak3 bringup): the one jak3-specific sprite behaviour -- the flag&0x30
+// corner order (do_block). Everything else (walk list, sprite bucket, frame data, glow /
+// distort sections) is a capture_chain parameter or shared with jak2's layout.
+void set_game(GameVersion v) {
+  s_jak3 = v == GameVersion::Jak3;
+}
 
 void set_near_fade(float screen_frac_end) {
   s_near_fade_end = screen_frac_end > 0.f ? screen_frac_end : 0.f;

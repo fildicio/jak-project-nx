@@ -98,5 +98,12 @@ class BlockSoundHandler : public SoundHandler {
 
   u32 m_sound_id{0};
   s32 m_start_tick{0};
+
+  // FIX 123 (AI-assisted): instant-death forensics. m_last_grain_type is stored once
+  // per grain and m_had_voice once per started voice; both are read only when a
+  // handler finishes young (the player.cpp probe), so the hot paths only grow by
+  // a single store each.
+  s32 m_last_grain_type{-1};
+  bool m_had_voice{false};
 };
 }  // namespace snd

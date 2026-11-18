@@ -1695,12 +1695,27 @@ const std::string* Loader::pick_eviction_victim() {
  * the caller is responsible for removing the LevelData itself.
  */
 void Loader::unload_level_gpu_objects(LevelData& lev, TexturePool& tex_pool) {
+  // FIX 124 (AI-assisted): pool entries drawn within the pool's defer window
+  // keep their GPU id: unload_texture_if_idle queues the unload for retry
+  // (Loader::update) instead of releasing the id now (PS2 semantics -- the
+  // original never evicted pages a running level still drew; see the
+  // TexturePool.h FIX 124 block). Ids released now join the garbage queue
+  // below exactly as before; deferred ids are queued by
+  // retry_deferred_unloads when they finally unload, never before, so no
+  // name is deleted while it is still drawn. Desktop (defer 0): identical to
+  // the old code.
+  std::vector<GLuint> freed_now;
   {
     std::unique_lock<std::mutex> lk(tex_pool.mutex());
     for (size_t i = 0; i < lev.textures.size() && i < lev.level->textures.size(); i++) {
       const auto& tex = lev.level->textures[i];
       if (tex.load_to_pool) {
-        tex_pool.unload_texture(PcTextureId::from_combo_id(tex.combo_id), lev.textures[i]);
+        if (tex_pool.unload_texture_if_idle(PcTextureId::from_combo_id(tex.combo_id),
+                                            lev.textures[i])) {
+          freed_now.push_back(lev.textures[i]);
+        }
+      } else {
+        freed_now.push_back(lev.textures[i]);
       }
     }
   }
@@ -1709,7 +1724,7 @@ void Loader::unload_level_gpu_objects(LevelData& lev, TexturePool& tex_pool) {
   // lev.textures more than once. Queue each name for deletion exactly once - a
   // second glDeleteTextures could hit a recycled name owned by a live level.
   std::unordered_set<GLuint> queued;
-  for (auto tex : lev.textures) {
+  for (auto tex : freed_now) {
     if (!queued.insert(tex).second) {
       continue;
     }
@@ -1929,6 +1944,31 @@ void Loader::purge_retired_levels(TexturePool& tex_pool, bool immediate) {
 void Loader::update(TexturePool& texture_pool) {
   Timer loader_timer;
   install_buffer_reclaim(texture_pool);
+
+  // FIX 124 (AI-assisted): finish the pool unload deferrals whose pages have
+  // gone idle (see the TexturePool.h FIX 124 block). Freed ids join the
+  // garbage queue so the existing paced delete handles them; pages the game
+  // still draws stay loaded. Desktop / kill-switch: defer_frames() is 0 and
+  // nothing was ever queued -- this is skipped.
+  if (texture_pool.defer_frames() > 0) {
+    std::vector<u64> released;
+    size_t outstanding;
+    {
+      std::unique_lock<std::mutex> lk(texture_pool.mutex());
+      outstanding = texture_pool.retry_deferred_unloads(released);
+    }
+    for (u64 id : released) {
+      m_garbage_textures.push_back((GLuint)id);
+    }
+    if (!released.empty() || outstanding > 0) {
+      static u32 s_fix124_logged = 0;
+      if (s_fix124_logged < 40 || (s_fix124_logged % 600) == 0) {
+        fmt::print("[loader] FIX124 pool defer: freed {} tex, {} still held\n",
+                   released.size(), outstanding);
+      }
+      s_fix124_logged++;
+    }
+  }
 
 #ifdef __SWITCH__
   // FIX 36 Task 3 (AI-assisted): retune the loader budget from the measured

@@ -120,6 +120,11 @@ void blit_frame_to(const DkImageView* dst, const DkImageRect* src_rect, const Dk
 // frame image is already cleared then. Falls back to blit_frame_to before the first present.
 void blit_prev_frame_to(const DkImageView* dst, const DkImageRect* src_rect,
                         const DkImageRect* dst_rect, uint32_t flags);
+// §7.2 half-res sky (AI-assisted): the reverse of blit_frame_to -- 2D-engine copy of an
+// offscreen dkgl image INTO the current frame colour image (the sky composite). Same
+// barrier pair as blit_frame_to (3D writes -> 2D blit -> image cache invalidated).
+void blit_to_frame(const DkImageView* src, const DkImageRect* src_rect,
+                   const DkImageRect* dst_rect, uint32_t flags);
 
 // T34b: sampler descriptor set written at init by T34a.
 // GPU addr = data-pool base + sampler_set_off(); samplerId for

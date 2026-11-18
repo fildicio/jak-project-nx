@@ -1009,6 +1009,11 @@ bool upload_bcn_texture(GLuint gl_tex, const tfrag3::Texture& tex) {
 
 u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
 #ifdef __SWITCH__
+  // Hand declaration, same as TexturePool.cpp: run_log.h cannot be included here (its
+  // transitive includes collide with this TU); one plain declaration is enough.
+  void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
+#ifdef __SWITCH__
   // T43 (AI-assisted): deko3d seam — same gate as the T23 TexturePool seam. With no
   // GL context on the dk path the glGenTextures/glTexImage2D below are silent
   // no-ops, so level textures never reach the GPU and the level stalls in staging.
@@ -1064,6 +1069,39 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
         }
       }
     }
+#ifdef __SWITCH__
+    // AI-assisted (DKGL_TODO row R): font-texture upload census. The fmt44 (MT4HH) glyph
+    // draws take their shape from the font texture's ALPHA channel (the HH half); if that
+    // alpha never reaches the dktexgpu image, every glyph quad renders as a solid box --
+    // the punch white-box flash. Log the store id + an alpha histogram at upload time so
+    // the draw-time probe can tell stale-id / no-alpha / corrupted-later apart. Fonts are
+    // tiny and only upload at level load: no rate limit needed.
+    if (tex.debug_name.find("font.") != std::string::npos ||
+        tex.debug_tpage_name.find("gamefont") != std::string::npos) {
+      if (tex.format == tfrag3::TEXTURE_FMT_RGBA && (size_t)tex.w * tex.h <= tex.data.size()) {
+        const u8* px = (const u8*)tex.data.data();
+        const size_t n = (size_t)tex.w * tex.h;
+        u32 a0 = 0, a255 = 0, amid = 0;
+        for (size_t i = 0; i < n; i++) {
+          const u8 a = px[i * 4 + 3];
+          if (a == 0) {
+            a0++;
+          } else if (a == 255) {
+            a255++;
+          } else {
+            amid++;
+          }
+        }
+        switch_run_logf("[fonttex] %s/%s %ux%u id=%u a0=%u a255=%u amid=%u p0=%02x%02x%02x%02x",
+                        tex.debug_tpage_name.c_str(), tex.debug_name.c_str(), tex.w, tex.h,
+                        dk_tex, a0, a255, amid, px[0], px[1], px[2], px[3]);
+      } else {
+        switch_run_logf("[fonttex] %s/%s fmt=%u id=%u (no RGBA census)",
+                        tex.debug_tpage_name.c_str(), tex.debug_name.c_str(),
+                        (unsigned)tex.format, dk_tex);
+      }
+    }
+#endif
     if (tex.load_to_pool) {
       // Bookkeeping only, mirroring the GL branches below. gpu_texture MUST equal
       // the value returned below: unload_texture() matches the pool entry by the id

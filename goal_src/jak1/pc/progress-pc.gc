@@ -1127,45 +1127,11 @@
 
 (define *text-languages*
   (static-text-list-array english
-                          uk-english
-                          french
-                          german
-                          spanish
-                          italian
-                          japanese
-                          portuguese
-                          br-portuguese
-                          swedish
-                          finnish
-                          danish
-                          norwegian
-                          dutch
-                          hungarian
-                          polish
-                          lithuanian
-                          czech
-                          croatian
-                          galician
-						  bosnian))
+                          italian))
 
 (define *subtitle-languages*
   (static-text-list-array english
-                          uk-english
-                          french
-                          german
-                          spanish
-                          italian
-                          br-portuguese
-                          swedish
-                          finnish
-                          danish
-                          dutch
-                          polish
-                          lithuanian
-                          czech
-                          croatian
-                          galician
-						  bosnian))
+                          italian))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  DYNAMIC MENU THINGS
@@ -2267,10 +2233,13 @@
                    (set! sound? (= (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect16x9))
                    (set! (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect4x3))
                   (((game-option-type language))
-                   ;; language selection. if not on first language, go back. if on first language, go to last.
-                   (if (> (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 0)
-                     (+! (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify))) -1)
-                     (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify))) 5))
+                   ;; AI-assisted (EN/IT only): back = italian -> english, english wraps to
+                   ;; italian (language-enum: english = 0, italian = 4). Any saved language
+                   ;; outside the menu lands on english after one press.
+                   (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify)))
+                         (if (> (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 0)
+                           0
+                           4))
                    ;; language was updated.
                    (set! (-> obj language-transition) #t)
                    (set! (-> obj language-direction) #t)
@@ -2354,10 +2323,12 @@
                    (set! sound? (= (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect4x3))
                    (set! (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect16x9))
                   (((game-option-type language))
-                   ;; same thing as before. if at last, go to first. otherwise, keep going forward.
-                   (if (< (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 5)
-                     (1+! (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify))))
-                     (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify))) 0))
+                   ;; AI-assisted (EN/IT only): forward = english -> italian, italian wraps
+                   ;; to english (language-enum: english = 0, italian = 4).
+                   (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify)))
+                         (if (< (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 4)
+                           4
+                           0))
                    (set! (-> obj language-transition) #t)
                    (set! (-> obj language-direction) #f)
                    (set! sound? #t))
@@ -3181,8 +3152,7 @@
                     (((game-option-type language))
                      ;; language carousell. who knew this could be so complicated.
                      (let ((old-lang (-> obj language-selection))
-                           (new-lang (-> (the-as (pointer language-enum) (-> options index value-to-modify))))
-                           (max-lang 6))
+                           (new-lang (-> (the-as (pointer language-enum) (-> options index value-to-modify)))))
                        (if (-> obj language-transition)
                          (seekl! (-> obj language-x-offset) 200 (the int (* 10.0 (-> *display* time-adjust-ratio)))))
                        (when (>= (-> obj language-x-offset) 100)
@@ -3193,11 +3163,13 @@
                        (set! (-> font origin y) (the float (+ y-off 3)))
                        (set-color! font (font-color progress-blue))
                        0
-                       (let ((next-lang (mod (+ old-lang 1) max-lang))
-                             (prev-lang (mod (+ max-lang -1 old-lang) max-lang))
-                             ;; these are used during the transition since it technically allows you to see 4 langs at once.
-                             (next2-lang (mod (+ old-lang 2) max-lang))
-                             (prev2-lang (mod (+ max-lang -2 old-lang) max-lang)))
+                       ;; AI-assisted (EN/IT only): with two languages every neighbour is
+                       ;; the other one (next/prev) or the current one (next2/prev2), so the
+                       ;; sliding animation stays inside the trimmed menu.
+                       (let ((next-lang (if (> (the-as int old-lang) 3) 0 4))
+                             (prev-lang (if (> (the-as int old-lang) 3) 0 4))
+                             (next2-lang (the-as int old-lang))
+                             (prev2-lang (the-as int old-lang)))
                          (cond
                            ((-> obj language-direction)
                             (let ((a2-22 (- 200 (+ (-> obj language-x-offset) 100)))) (print-language-name prev-lang font a2-22 #f))

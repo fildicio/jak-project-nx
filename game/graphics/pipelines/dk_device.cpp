@@ -121,13 +121,17 @@ constexpr uint32_t kStagingMax = 512 * 1024 * 4;  // up to 512x1024 RGBA splash
 // (image @+0, sampler @+0x20; 32 B each). T22b grows the region by
 // kMaxTexImages * DK_IMAGE_DESCRIPTOR_ALIGNMENT so the P2.3 texture pool can place one
 // DkImageDescriptor per live texture at (kOffDesc + 0x100 + i * DK_IMAGE_DESCRIPTOR_ALIGNMENT).
-// NOTE: kDescBytes = 0x100 + 2048 * DK_IMAGE_DESCRIPTOR_ALIGNMENT. DK_IMAGE_DESCRIPTOR_ALIGNMENT
-// is 0x20 (deko3d.h:153; DkImageDescriptor is an opaque 32-B struct), so the grown region is
-// 0x10100. kMaxTexImages matches dktexgpu::kMaxTexImages (the 2048-slot texture store capacity).
-constexpr uint32_t kMaxTexImages = 2048;
+// NOTE: kDescBytes = 0x100 + kMaxTexImages * DK_IMAGE_DESCRIPTOR_ALIGNMENT. DK_IMAGE_DESCRIPTOR_ALIGNMENT
+// is 0x20 (deko3d.h:153; DkImageDescriptor is an opaque 32-B struct), so the region is
+// 0x20100 with kMaxTexImages = 4096. FIX 119 (AI-assisted): 2048 -> 4096 -- a 51-min Haven
+// City session hit the 2048-slot store cap (high=2048, live=1972) at the same time the
+// 96 MB image pool filled (2.87M failed uploads -> black untextured models). kMaxTexImages
+// must match dktexgpu::kMaxTexSlots (dk_texture_gpu.cpp), which sizes the store and the
+// s_images[] array.
+constexpr uint32_t kMaxTexImages = 4096;
 constexpr uint32_t kOffDesc = kOffStaging + kStagingMax;  // 0x224000, naturally 0x20-aligned
-constexpr uint32_t kDescBytes = 0x100 + kMaxTexImages * DK_IMAGE_DESCRIPTOR_ALIGNMENT;  // 0x10100
-constexpr uint32_t kOffUbo = kOffDesc + kDescBytes;       // 0x234100, 0x100-aligned
+constexpr uint32_t kDescBytes = 0x100 + kMaxTexImages * DK_IMAGE_DESCRIPTOR_ALIGNMENT;  // 0x20100
+constexpr uint32_t kOffUbo = kOffDesc + kDescBytes;       // 0x244100, 0x100-aligned
 constexpr uint32_t kUboBytes = 0x80000;  // T20: 512 KB UBO ring = kFbNum (2) frames x 256 KB segments
 // T34a: P3.2 sampler-descriptor region, appended AFTER the UBO ring at the data-pool end
 // (never renumber existing offsets). kSamplers[] (PipelineTable.inc) is 16 entries
@@ -137,7 +141,7 @@ constexpr uint32_t kUboBytes = 0x80000;  // T20: 512 KB UBO ring = kFbNum (2) fr
 // (old kDataPool 0x2B4100 already aligns up to 0x2B5000, leaving 0xF00 > 0x200),
 // so make_block's align_up leaves the allocated memblock size unchanged at 0x2B5000.
 constexpr uint32_t kSamplerCount = sizeof(kSamplers) / sizeof(kSamplers[0]);  // 16 (PipelineTable.inc)
-constexpr uint32_t kOffSamplers = kOffUbo + kUboBytes;             // 0x2B4100, == old data-pool end
+constexpr uint32_t kOffSamplers = kOffUbo + kUboBytes;             // 0x2C4100, == pre-T34a data-pool end
 constexpr uint32_t kSamplersBytes = kSamplerCount * DK_SAMPLER_DESCRIPTOR_ALIGNMENT;  // 0x200 = 512 B
 // T106 (AI-assisted): dkgl sampler COMBOS for the GL-style layer, appended after the
 // T34a table. combo bit0 min_linear | bit1 mag_linear | bit2 mip_linear | bit3 repeat_s |
@@ -145,12 +149,13 @@ constexpr uint32_t kSamplersBytes = kSamplerCount * DK_SAMPLER_DESCRIPTOR_ALIGNM
 // 32 * 0x20 = 0x400 more, absorbed by the same rounding slack (region end 0x2B4300 +
 // 0x400 = 0x2B4700 < 0x2B5000), so the memblock size is still 0x2B5000.
 constexpr uint32_t kDkglSamplerCount = 32;
-constexpr uint32_t kOffDkglSamplers = kOffSamplers + kSamplersBytes;  // 0x2B4300
+constexpr uint32_t kOffDkglSamplers = kOffSamplers + kSamplersBytes;  // 0x2C4300
 constexpr uint32_t kDkglSamplersBytes = kDkglSamplerCount * DK_SAMPLER_DESCRIPTOR_ALIGNMENT;
-constexpr uint32_t kDataPool = kOffDkglSamplers + kDkglSamplersBytes;  // 0x2B4700
-// The data memblock is rounded up to DK_MEMBLOCK_ALIGNMENT (0x1000) inside make_block; both
-// 0x2B4100 and 0x2B4300 round up to the same 0x2B5000, so the 512 B growth is absorbed with no
-// allocation-size change. (kOffSamplers is 0x20-aligned: 0x2B4100 % 0x20 == 0.)
+constexpr uint32_t kDataPool = kOffDkglSamplers + kDkglSamplersBytes;  // 0x2C4700
+// The data memblock is rounded up to DK_MEMBLOCK_ALIGNMENT (0x1000) inside make_block; with
+// FIX 119's 4096 descriptor slots kDataPool 0x2C4700 aligns up to 0x2C5000, and the sampler
+// regions (0x200 + 0x400) still fit inside that 0x900 rounding slack, so the memblock
+// allocation is 0x2C5000.
 static_assert(kOffDesc % DK_IMAGE_DESCRIPTOR_ALIGNMENT == 0, "desc region must be 0x20-aligned");
 static_assert(kOffUbo % DK_UNIFORM_BUF_ALIGNMENT == 0, "ubo region must be 0x100-aligned");
 static_assert(kOffSamplers % DK_SAMPLER_DESCRIPTOR_ALIGNMENT == 0, "sampler region must be 0x20-aligned");
@@ -1159,6 +1164,15 @@ void blit_frame_to(const DkImageView* dst, const DkImageRect* src_rect, const Dk
                    uint32_t flags) {
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, 0);
   dkCmdBufBlitImage(s_cmd, &s_curFbView, src_rect, dst, dst_rect, flags, 0);
+  dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+}
+
+// §7.2 half-res sky (AI-assisted): the reverse of blit_frame_to -- an offscreen dkgl image
+// (the half-res sky target) composited into the frame colour image.
+void blit_to_frame(const DkImageView* src, const DkImageRect* src_rect,
+                   const DkImageRect* dst_rect, uint32_t flags) {
+  dkCmdBufBarrier(s_cmd, DkBarrier_Full, 0);
+  dkCmdBufBlitImage(s_cmd, src, src_rect, &s_curFbView, dst_rect, flags, 0);
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Image);
 }
 
