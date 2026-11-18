@@ -359,6 +359,24 @@ does. Waiting for #10 before coding serializes work that can overlap.
    `gpu top` ~1-1.5 ms, no regression in the gun-course haze / warp red cone (they read the
    frame the composite writes). NRO `9d7727d7` (check-switch PASS, dk-lint PASS, deployed to
    the SD 2026-11-18 with rotation; old `896798cb` → `jak2.nro.bak-896798cb`).
+   **2026-11-18 static audit + zero-draw guard (AI-assisted):** full line-by-line trace of the
+   record flow before the first HW boot — snapshot `blit_framebuffer` → `blit_frame_to_tex`
+   segment (mirrors the HW-proven DepthCue/distort path, `DkBarrier_Full` inside
+   `dkdev::blit_frame_to`), offscreen bind recorded IN the draw list by the pending-target
+   flush (ocean pattern, immune to the segment `frame_target` flag), composite
+   `blit_tex_to_frame` with the Full + Image-invalidate barriers inside `dkdev::blit_to_frame`
+   (P3 covered), read-FBO stays 0 for every later blit caller, pool-full tex_image_2d failure
+   falls back to the full-res path. One real edge case found and fixed: a frame where the sky
+   bucket emits **no draws** (menus/loads/fades) still composited the snapshot back — a
+   720→360→720 linear round-trip that blurs the whole frame, where GL leaves the frame
+   untouched. `sky_halfres_end(bool drew)` now skips the composite when
+   `draw_count() == draws_before`; the 10-s stats line gained `nodraw`
+   (`sky halfres N fail M nodraw K`). NRO `120ea635` (check-switch PASS, dk-lint PASS; includes
+   the jak3 agent's uncommitted J9 y-scale pick, verified behaviour-neutral for jak2:
+   `g_game_version != 1` selects the same `_jak2_dksh` variants, hfrag is a jak3-only pass).
+   **Not deployed — SD card not mounted; deploy with rotation when next inserted, then the
+   same HW checks as `9d7727d7` apply (sky orientation/colours/alpha, b5 ~1-1.5 ms in
+   `gpu top`, no gun-course-haze / warp-cone regression).**
    **Slow-mo fix (2026-11-01, GAME.CGO `f8765700`, HW pending):** `pc-maybe-vsync` in
    `goal_src/jak2/engine/draw/drawable.gc` now returns the measured frame time as the dog-ratio
    (jitter < 1.15 -> 1.0, max 4.0), like the PS2 display-sync, so drops below 60 no longer slow

@@ -1963,10 +1963,19 @@ void Loader::update(TexturePool& texture_pool) {
         loader_under_pressure() || dktexgpu::failed_allocs() > 0;
     if (tex_pressure != s_fix125_pressure) {
       s_fix125_pressure = tex_pressure;
-      switch_run_logf("[loader] FIX125 pressure: pool defer window %s",
-                      tex_pressure ? "3600 -> 120 frames" : "back to 3600 frames");
+      switch_run_logf("[loader] FIX125 pressure: pool defer window %s, slot guard %s",
+                      tex_pressure ? "3600 -> 120 frames" : "back to 3600 frames",
+                      tex_pressure ? "held-while-linked -> 3600 frames"
+                                   : "back to held-while-linked");
       texture_pool.set_defer_frames(tex_pressure ? TexturePool::kPoolDeferFramesPressure
                                                   : TexturePool::kPoolDeferFrames);
+      // FIX 131 (AI-assisted): keep the slot-linked guard an order of
+      // magnitude longer than the draw-stamp window under pressure -- the
+      // nozb1 log proved a 120-frame pressure window is what let the gungame
+      // purge kill course tpages GOAL had uploaded 0.9 s earlier. ~60 s idle
+      // is the last resort, not the default.
+      texture_pool.set_slot_guard_frames(tex_pressure ? TexturePool::kSlotGuardFramesPressure
+                                                      : TexturePool::kSlotGuardFrames);
     }
   }
 #endif

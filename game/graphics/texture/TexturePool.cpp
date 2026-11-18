@@ -45,7 +45,13 @@ namespace {
 // loader filling that PcTextureId, [pool] placeholder-new = a link before the
 // give, [pool] unload = the entry going placeholder again.
 bool tex_probe_page(u32 page) {
-  return page == 998 || page == 2405 || page == 1021 || page == 1325;
+  // FIX 123 set: 998 hiphog-sprite, 2405 gungame-sprite, 1021 ctysluma-sprite,
+  // 1325 ctyport-sprite. FIX 131 additions (gk_run_log jak2-nozb1 2026-11-18,
+  // the never-given miss class): 853 ruins-vis, 929 ruins, 2929 lwidea-pris,
+  // 3090 title-sprite -- all missed for minutes with no give/purge pair, so
+  // the next hardware run can see who should have given them.
+  return page == 998 || page == 2405 || page == 1021 || page == 1325 || page == 853 ||
+         page == 929 || page == 2929 || page == 3090;
 }
 }  // namespace
 #endif
@@ -465,7 +471,15 @@ bool TexturePool::unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id) {
       age = id_age;
     }
   }
-  if (age > m_defer_frames) {
+  // FIX 131 (AI-assisted): slot-linked protection (see the TexturePool.h FIX
+  // 126 block). If removing this copy would flip a still-linked entry to
+  // placeholder -- GOAL keeps drawing its tbps / mt4hh slots -- hold the page
+  // for the slot-guard window instead of the draw-stamp window. A copy that
+  // is not the last one can never blacken anything: unload it as before.
+  const bool last_linked_copy =
+      tex->gpu_textures.size() == 1 && (!tex->slots.empty() || !tex->mt4hh_slots.empty());
+  const u32 guard = last_linked_copy ? m_slot_guard_frames : m_defer_frames;
+  if (age > guard) {
     unload_texture(tex_id, gpu_id);
     return true;
   }
@@ -480,12 +494,25 @@ bool TexturePool::unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id) {
   m_deferred_unloads.push_back({tex_id, gpu_id});
 #if defined(__SWITCH__)
   {
-    static u32 s_fix124_logged = 0;
-    if (s_fix124_logged < 40 || (s_fix124_logged % 600) == 0) {
-      switch_run_logf("[pool] FIX124 defer unload %u/%u (drawn %llu frames ago, %zu queued)",
-                      tex_id.page, tex_id.tex, (unsigned long long)age, m_deferred_unloads.size());
+    if (last_linked_copy) {
+      // FIX 131: held because GOAL still has tbp/mt4hh links to the entry,
+      // not because of a draw stamp -- say so, so hardware logs can tell the
+      // two defer reasons apart.
+      static u32 s_fix126_logged = 0;
+      if (s_fix126_logged < 40 || (s_fix126_logged % 600) == 0) {
+        switch_run_logf("[pool] FIX131 slot-guard hold %u/%u (%zu tbp + %zu mt4hh links)",
+                        tex_id.page, tex_id.tex, tex->slots.size(), tex->mt4hh_slots.size());
+      }
+      s_fix126_logged++;
+    } else {
+      static u32 s_fix124_logged = 0;
+      if (s_fix124_logged < 40 || (s_fix124_logged % 600) == 0) {
+        switch_run_logf("[pool] FIX124 defer unload %u/%u (drawn %llu frames ago, %zu queued)",
+                        tex_id.page, tex_id.tex, (unsigned long long)age,
+                        m_deferred_unloads.size());
+      }
+      s_fix124_logged++;
     }
-    s_fix124_logged++;
   }
 #endif
   return false;
@@ -512,7 +539,15 @@ size_t TexturePool::retry_deferred_unloads(std::vector<u64>& out_released) {
           age = id_age;
         }
       }
-      if (age > m_defer_frames) {
+      // FIX 131 (AI-assisted): mirror unload_texture_if_idle's slot-linked
+      // guard here -- a deferred unload must not release the last copy of a
+      // still-linked entry just because the page went draw-idle (blackouts
+      // idle everything; the game re-draws the tbp when gameplay resumes).
+      const u32 guard =
+          (tex->gpu_textures.size() == 1 && (!tex->slots.empty() || !tex->mt4hh_slots.empty()))
+              ? m_slot_guard_frames
+              : m_defer_frames;
+      if (age > guard) {
         // The same teardown unload_texture does, from the retry path.
         auto it = std::find_if(tex->gpu_textures.begin(), tex->gpu_textures.end(),
                                [&](const auto& a) { return a.gl == d.gpu_id; });

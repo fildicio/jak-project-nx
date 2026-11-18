@@ -349,6 +349,42 @@ class TexturePool {
   // FIX 125: ~60 s idle at 60 fps (Switch default), pressure fallback ~2 s.
   static constexpr u32 kPoolDeferFrames = 3600;
   static constexpr u32 kPoolDeferFramesPressure = 120;
+
+  // ---- FIX 131 (AI-assisted): slot-linked protection (PS2 VRAM semantics) ----
+  // Root cause of the Switch black walls (gk_run_log jak2-nozb1 2026-11-18):
+  // purge_retired_levels / eviction unloads a retired level's pool textures
+  // while GOAL still draws the tbps linked to them. unload_texture flips the
+  // entry back to placeholder WITHOUT unlinking its slots, so every later
+  // draw misses forever (dk_sprite_lookup -> SpriteDk skips the batch ->
+  // black). Draw stamps (FIX 124) cannot protect those pages: nothing draws
+  // during a blackout, so the age check expires exactly when the purge fires
+  // at blackout-exit, and the game re-draws the tbp for minutes afterwards
+  // (measured 82-219 s black windows; s16 gungame course, s18 boot purge).
+  // On PS2 this cannot happen: VRAM at a linked address stays valid until
+  // the EE overwrites it -- a later handle_upload_now re-points the slot to
+  // another entry and remove_slot drops it from this one. FIX 131 restores
+  // that rule: an unload that would remove the LAST GPU copy of an entry
+  // that still has linked slots (tbp or mt4hh) is held for the slot-guard
+  // window instead of the draw-stamp window, so the entry keeps its id and
+  // its slots and draws keep hitting. Memory stays bounded the same way the
+  // PS2's was: the next level's upload-now re-points the shared 4 MB of
+  // tpage addresses, dropping the old entries' links; and under real memory
+  // pressure Loader::update (FIX 125) drops the guard to
+  // kSlotGuardFramesPressure so a tight heap still reclaims idle pages.
+  // Copies that are not the last one unload exactly as before (another
+  // level still holds the data, the entry can never go placeholder).
+  // defer_frames() == 0 (desktop / gk_dkgl_nopooldefer.txt) bypasses this
+  // exactly like FIX 124.
+  void set_slot_guard_frames(u32 frames) { m_slot_guard_frames = frames; }
+  u32 slot_guard_frames() const { return m_slot_guard_frames; }
+
+  // FIX 131: hold linked pages as long as they stay linked (PS2 semantics);
+  // pressure fallback = ~60 s idle at 60 fps -- NOT the 120-frame FIX 125
+  // window, which the nozb1 log proved is what let the gungame purge kill
+  // course tpages GOAL had uploaded 0.9 s earlier.
+  static constexpr u32 kSlotGuardFrames = 0xFFFFFFFFu;
+  static constexpr u32 kSlotGuardFramesPressure = 3600;
+
   void note_draw_id(u64 gpu_id);
   bool unload_texture_if_idle(PcTextureId tex_id, u64 gpu_id);
   size_t retry_deferred_unloads(std::vector<u64>& out_released);
@@ -440,6 +476,10 @@ class TexturePool {
   // paths already hold.
   u64 m_draw_frame = 0;
   u32 m_defer_frames = 0;
+  // FIX 131 (AI-assisted): slot-linked guard window (see the header block).
+  // Render-thread-only like m_defer_frames (written by pool creation and
+  // Loader::update, read by the unload paths on the same thread).
+  u32 m_slot_guard_frames = kSlotGuardFrames;
   // Per-id draw stamps for ids bound without a tbp lookup (dkgl bind seam).
   // Indexed by dktexgpu store id; sized to the store's 4096 slots
   // (kMaxTexImages, FIX 119). Ids outside the array (if any) simply don't

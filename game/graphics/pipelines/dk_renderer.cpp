@@ -869,7 +869,15 @@ void dk_loader_start() {
     const bool defer_on = access(defer_path, F_OK) != 0;
     s_dk_tex_pool->set_defer_frames(
         defer_on ? TexturePool::kPoolDeferFrames : 0);
-    switch_run_logf("[dk] pool defer unload %s", defer_on ? "ON (FIX124/125, 3600 frames)" : "OFF (gk_dkgl_nopooldefer.txt)");
+    // FIX 131 (AI-assisted): slot-linked protection -- the last GPU copy of an
+    // entry GOAL still has tbp/mt4hh links to is held while linked (PS2 VRAM
+    // semantics) instead of being released after the draw-stamp idle window;
+    // see the TexturePool.h FIX 131 block. Same kill switch as FIX 124/125.
+    s_dk_tex_pool->set_slot_guard_frames(
+        defer_on ? TexturePool::kSlotGuardFrames : 0);
+    switch_run_logf("[dk] pool defer unload %s",
+                    defer_on ? "ON (FIX124/125/131: 3600 frames, slot-linked held)"
+                             : "OFF (gk_dkgl_nopooldefer.txt)");
   }
   const auto fr3 =
       file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] / "fr3";

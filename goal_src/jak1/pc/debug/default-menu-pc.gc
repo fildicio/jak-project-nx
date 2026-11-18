@@ -466,11 +466,28 @@
       (set! (-> *pc-settings* territory) terr))
     (= (-> *pc-settings* territory) terr)))
 
+;; FIX 129 (Switch): debug-menu cheat toggles now persist across reboot.
+;; Previously dm-pc-cheats-pick-func (and the inline eco/invinc lambdas below)
+;; only flipped the cheat bit -- jak1's update-cheats is a no-op stub, so
+;; nothing ever wrote pc-settings.gc after a debug-menu toggle and the last
+;; previously-saved value came back on the next boot (same class as jak2's
+;; FIX 127). The cheat is also OR'd into cheats-known: handle-input-settings
+;; masks the saved cheats to cheats-known on load (anti-cheat: you only keep
+;; cheats you've unlocked), so without this the save would be silently masked
+;; off on the next boot. The commit is skipped in speedrunner mode, matching
+;; jak2's FIX 127 rule that speedrun cheat modifications are never persisted.
+(defun dm-pc-cheat-save! ((cheat pc-cheats))
+  (logior! (-> *pc-settings* cheats-known) cheat)
+  (when (not (-> *pc-settings* speedrunner-mode?))
+    (commit-to-file *pc-settings*))
+  0)
+
 (defun dm-pc-cheats-pick-func ((bcheat int) (msg debug-menu-msg))
   (let ((cheat (the pc-cheats (/ bcheat 8))))
     (when (= msg (debug-menu-msg press))
       (logxor! (-> *pc-settings* cheats) cheat)
-      (cheats-sound-play (logtest? (-> *pc-settings* cheats) cheat)))
+      (cheats-sound-play (logtest? (-> *pc-settings* cheats) cheat))
+      (dm-pc-cheat-save! cheat))
     (logtest? (-> *pc-settings* cheats) cheat)))
 
 (when (-> *debug-menu-context* root-menu)
@@ -545,35 +562,40 @@
                                                                                  ,(lambda (arg (msg debug-menu-msg))
                                                                                    (when (= msg (debug-menu-msg press))
                                                                                      (logclear! (-> *pc-settings* cheats) (pc-cheats eco-red eco-yellow eco-green))
-                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-blue))
+                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-blue)
+                                                                                     (dm-pc-cheat-save! (pc-cheats eco-blue)))
                                                                                    (pc-cheats? (-> *pc-settings* cheats) eco-blue)))
                                                                            (flag "Red eco"
                                                                                  #f
                                                                                  ,(lambda (arg (msg debug-menu-msg))
                                                                                    (when (= msg (debug-menu-msg press))
                                                                                      (logclear! (-> *pc-settings* cheats) (pc-cheats eco-blue eco-yellow eco-green))
-                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-red))
+                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-red)
+                                                                                     (dm-pc-cheat-save! (pc-cheats eco-red)))
                                                                                    (pc-cheats? (-> *pc-settings* cheats) eco-red)))
                                                                            (flag "Green eco"
                                                                                  #f
                                                                                  ,(lambda (arg (msg debug-menu-msg))
                                                                                    (when (= msg (debug-menu-msg press))
                                                                                      (logclear! (-> *pc-settings* cheats) (pc-cheats eco-red eco-yellow eco-blue))
-                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-green))
+                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-green)
+                                                                                     (dm-pc-cheat-save! (pc-cheats eco-green)))
                                                                                    (pc-cheats? (-> *pc-settings* cheats) eco-green)))
                                                                            (flag "Yellow eco"
                                                                                  #f
                                                                                  ,(lambda (arg (msg debug-menu-msg))
                                                                                    (when (= msg (debug-menu-msg press))
                                                                                      (logclear! (-> *pc-settings* cheats) (pc-cheats eco-red eco-blue eco-green))
-                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-yellow))
+                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) eco-yellow)
+                                                                                     (dm-pc-cheat-save! (pc-cheats eco-yellow)))
                                                                                    (pc-cheats? (-> *pc-settings* cheats) eco-yellow)))
                                                                            (flag "Invincibility"
                                                                                  #f
                                                                                  ,(lambda (arg (msg debug-menu-msg))
                                                                                    (when (= msg (debug-menu-msg press))
                                                                                      (logclear! (-> *target* state-flags) 16)
-                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) invinc))
+                                                                                     (pc-cheat-toggle-and-tune (-> *pc-settings* cheats) invinc)
+                                                                                     (dm-pc-cheat-save! (pc-cheats invinc)))
                                                                                    (pc-cheats? (-> *pc-settings* cheats) invinc)))
                                                                            (flag "Blue sidekick" (the binteger (pc-cheats sidekick-blue)) dm-pc-cheats-pick-func)
                                                                            (flag "All flavas" (the binteger (pc-cheats tunes)) dm-pc-cheats-pick-func)

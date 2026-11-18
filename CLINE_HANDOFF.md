@@ -2082,6 +2082,134 @@ GAME.CGO: Desktop `8da29cac` (pre-FIX126) → card `f02.bak` (Nov 4).
 dk_renderer.cpp (FIX 125) + mood.gc/mood-h.gc (FIX 126). This handoff file is left
 uncommitted (shared with the in-progress jak3 session's J11 entry).
 
+## 2026-11-18 — BLACK WALLS DEEP-DIVE: full log re-analysis of jak2-nozb1 (FIX 123 was only 1 of 3 mechanisms) (AI-assisted, Cline)
+
+**Why:** user asked to dig into the Jak 2 black-wall issue "we didn't
+understand". The nozb1 capture (`hw-logs/jak2-nozb1-20261118-1416/`,
+gk_run_log 528k lines / 18 sessions + gk_stdout 39 boots) had NEVER been
+fully analyzed — FIX 123 looked at one session only. Re-correlated every
+MISS against its pool entry's give/link/unload history (state simulation,
+correct event ordering) + aligned the stdout purge/reclaim/ready stream.
+
+**Data (sessions 16/17/18 = instrumented builds; s16 IS the f123 tour):**
+- s16 (379 s): gungame 2405 given 56.6 → re-linked 176.884 (GOAL upload-now)
+  → **purged 177.799** with 6 other levels → MISS 178.2→379.1 (end), never
+  re-given. ctysluma 1021 given 10.8 → purged 35.6 (player left slums) →
+  misses to 107.6, never re-given. hiphog 998/ctyport 1325 startup misses
+  at ~35.5 heal in <0.1 s (give was 50 ms later — benign).
+- s17 (371 s): 998/1325 purged 59.4 (exit purge entering ruins) → re-given
+  +5–9 s (reload) = brief flash; a later purge left 998 black for **+171–219 s**
+  until the player's return reloaded hiphog. NEW page class: **853
+  ruins-vis** (14 misses 69.6→261.8) — NOT in the probe set, so its
+  give/unload telemetry is unknown; fr3 says pool=1 (should be given at
+  ruins load; no purge/reclaim of ruins in that boot — suspect texture-stage
+  streaming lag after "ready" or repeated re-miss; NEEDS 853/929/2929/3090
+  added to tex_probe_page).
+- s18 (191 s): **boot purge at 31.3 recycled title/lwidea/ctywide/ctysluma
+  while the intro still draws them** → title-sprite 3090 (12 misses) +
+  lwidea-pris 2929 (34) black 33.3→~45 s, healed by lwidea reload.
+  ctysluma 1021 black 33.3→93.1 (~83 s) until the slums reload.
+
+**The mechanism (all three classes, one root):** `purge_retired_levels`
+(Loader.cpp:1878, called from `update_blocking` at blackout-exit) unloads
+pool pages of every level not in `m_active_levels`/`m_desired_levels` at
+that instant. GOAL keeps drawing tbps linked to those pages (HUD/sprites of
+other areas, revisits, intro), `dk_sprite_lookup` finds `is_placeholder` →
+SpriteDk SKIPS the batch → black. **Nothing ever re-gives a purged page**
+unless the owning level file happens to reload at a later area transition
+(GOAL doesn't re-request levels its own cache thinks are resident; the
+loader does not auto-load desired-but-missing levels). Eviction
+(`pick_eviction_victim`/`reclaim`) does the same via a second door.
+
+**Verdict on FIX 124/125:** deferral treats the symptom. Measured
+black-window (unload→re-give) durations: 5–9 s, 82.6 s, up to 218.8 s —
+**the 60 s (3600-frame) window does not cover them**; the pressure
+fallback (120 frames) makes it worse exactly when memory is tight. Pages
+drawn continuously (the s16 gungame HUD case) should now survive f125
+(stamps keep refreshing — needs HW confirm), but "left area, came back
+>60 s later" walls will persist.
+
+**Fix directions for next session (my recommendation, not implemented):**
+1. *Slot-linked protection (PS2 semantics, cheapest correct fix):* in
+   `unload_texture_if_idle`, also defer/refuse when the entry still has
+   linked slots (`entry->slots` / `m_textures[tbp].source == entry`).
+   Slots are only re-pointed by a new `handle_upload_now` — i.e. a page
+   lives until GOAL overwrites it, exactly like PS2 VRAM. Memory is
+   bounded by the existing pressure path. Verify first whether
+   `unload_texture` already detaches slots (it calls refresh_links — read
+   it before implementing).
+2. *Re-give on miss:* keep `src_data` alive on the entry after unload and
+   lazily re-upload (budgeted); heavier, only if (1) is insufficient.
+3. Add 853/929/2929/3090 to `tex_probe_page` for the next HW run so the
+   never-given class gets telemetry (853 ruins-vis is pool=1 in fr3 and
+   still missed for 200 s — unexplained).
+4. Optional: `purge_retired_levels` should skip levels retired < ~2 s ago
+   (the s18 boot purge killed pages the intro was still drawing; the
+   gungame purge fired 1 s after GOAL re-uploaded the course tpages).
+
+Artifacts: `/tmp/j2_events.pkl` (parsed event stream), this analysis only —
+no code changed. check-dk.py untouched (no dk edits).
+
+## 2026-11-18 (18:00) — FIX 131: slot-linked protection — the structural black-wall fix, IMPLEMENTED + BUILT (AI-assisted, Cline)
+
+Follows the BLACK WALLS DEEP-DIVE above. Implemented recommendation #1
+(slot-linked protection, PS2 VRAM semantics) — note **FIX 126/127/128/129/130
+were already taken** by the mood/cheats/settings series, so this is **FIX 131**.
+
+**What changed (4 files, all unload doors covered — every door funnels through
+`Loader::unload_level_gpu_objects` → `TexturePool::unload_texture_if_idle`):**
+- `TexturePool.h/.cpp` — FIX 131: an unload that would remove the **last GPU
+  copy** of an entry that **still has linked slots** (`slots` / `mt4hh_slots`;
+  `unload_texture` never unlinks them — that was the bug) is held for a new
+  slot-guard window instead of the draw-stamp window:
+  - normal = `kSlotGuardFrames` (0xFFFFFFFF = hold while linked, PS2 semantics);
+  - pressure = `kSlotGuardFramesPressure` = 3600 frames (~60 s idle) — an order
+    of magnitude above FIX 125's 120-frame pressure window, which is what let
+    the s16 gungame purge kill course tpages GOAL uploaded 0.9 s earlier;
+  - non-last copies unload exactly as before (can never flip an entry to
+    placeholder, so can never blacken anything);
+  - mirrored in `retry_deferred_unloads` (the guard is re-evaluated every
+    frame, so a held page releases via the normal idle window once a later
+    `handle_upload_now` re-points its slots — PS2 VRAM turnover, which is what
+    bounds memory);
+  - desktop / `gk_dkgl_nopooldefer.txt`: `defer_frames()==0` bypasses FIX 131
+    exactly like FIX 124 (old behavior, byte-identical).
+  - New telemetry: `[pool] FIX131 slot-guard hold %u/%u (%zu tbp + %zu mt4hh
+    links)` (rate-limited like the FIX124 line) so hardware logs can tell the
+    two defer reasons apart.
+- `dk_renderer.cpp` (`dk_loader_start`) — sets the slot guard at pool creation,
+  same `gk_dkgl_nopooldefer.txt` kill switch; boot log now reads
+  `[dk] pool defer unload ON (FIX124/125/131: 3600 frames, slot-linked held)`.
+- `Loader.cpp` (`update`, FIX 125 block) — pressure toggles the slot guard too
+  (held-while-linked ↔ 3600 frames), log line extended.
+- `tex_probe_page` — added the never-given miss class from the nozb1 log:
+  **853 ruins-vis, 929 ruins, 2929 lwidea-pris, 3090 title-sprite** (telemetry
+  only; their give/purge history is still unknown).
+
+**Why this is structural and FIX 124/125 wasn't:** draw stamps idle during
+blackouts, so the age check expired exactly when the blackout-exit purge fired,
+and the game re-drew the purged tbps for minutes after (measured 82–219 s).
+The slot link is the game's own declaration "this VRAM address holds this
+texture" — the only signal that survives a blackout. On PS2 the page would
+simply still be in VRAM.
+
+**Left alone deliberately:** `do_reload_common` still calls `unload_texture`
+directly (explicit REPL dev command that unconditionally deletes ids right
+after — deferring there would break its delete loop). Handoff rec #4 (purge
+skip <2 s) not needed: FIX 131 protects the textures regardless of purge age.
+
+**Status:** check-dk PASS · docker Switch build clean 66/66, no new warnings ·
+`build-switch-jak2/game/gk.nro` rebuilt 18:12+ (AI-assisted). **DEPLOY BLOCKED:
+SD card unmounted** (`/Volumes/` shows only Macintosh HD). When remounted:
+deploy as `jak2.nro` per the usual rotate-old-build procedure. **HW verify:**
+expect `[pool] FIX131 slot-guard hold` lines at purges/evictions, and the
+s16/s18/s17 scenarios (gungame course, boot intro logos, ruins revisit)
+staying textured; the never-given class (853/929/2929/3090) needs the new
+probe lines to diagnose — FIX 131 does NOT fix that class (no unload is
+involved; page 853 is pool=1 in ruins.fr3 yet never given — still unexplained).
+Desktop regression safety: FIX 131 is inert when defer==0 (desktop default).
+
+
 ## 2026-11-18 (Mac clock) — FIX 128: weather selection persists (jak2, sun survives reboot) (AI-assisted, Cline)
 
 **User report:** "I select the sun, save, reboot — it rains again."
@@ -2134,3 +2262,280 @@ good, plus the lightning guard) in jak3's mood code, which has a DIFFERENT
 structure from jak2's (different locals/seek pattern — not a blind copy).
 
 Not committed yet (held for user approval per workflow).
+
+## 2026-11-18 (Mac clock) — FIX 129 + FIX 130: jak1 debug-cheats persistence, jak2 duplicate settings line (AI-assisted, Cline)
+
+**User ask:** "in the meantime spot bugs in jak1 and jak2, analyse everything, do bugfixes if necessary, write what you do and list the issues."
+
+**Scope:** sweep of the settings/cheats persistence code paths (same area as FIX 127/128): pc-settings writer/parser pairs, debug + pause cheat menus, cheat consumers, and the shared-file reuse across games.
+
+**FIX 129 — jak1: debug-menu cheat toggles never persisted (same class as jak2's FIX 127).**
+- `dm-pc-cheats-pick-func` and the five inline eco-blue/red/green/yellow + invincibility
+  lambdas in `pc/debug/default-menu-pc.gc` "PC cheats" page only XOR'd the bit. jak1's
+  `update-cheats` is a no-op stub (jak2's does the within-frame diff save), so nothing
+  ever wrote pc-settings.gc after a debug-menu toggle — the last previously-saved
+  value came back on every boot.
+- Second trap: even when the file got written by any other settings commit,
+  `handle-input-settings` masks the saved cheats to `cheats-known` on load
+  (anti-cheat: you only keep cheats you've unlocked), so unearned toggles silently
+  reverted at boot anyway.
+- Fix: new `dm-pc-cheat-save!` helper — ORs the cheat into `cheats-known` (same
+  grant the debug-mode l1+r1 unlock combo already makes, progress-pc.gc:2618) and
+  commits the file, guarded by `speedrunner-mode?` (matches jak2's FIX 127 rule
+  that speedrun cheat changes are never persisted). Called from the pick-func
+  and all five inline lambdas.
+
+**FIX 130 — jak2: every saved pc-settings.gc contained a duplicate `(subtitle-speaker ...)` line.**
+- `handle-output-settings` calls the SHARED parent writer first
+  (`(method-of-type pc-settings handle-output-settings)` — that is jak1's
+  `pckernel-common.gc`, which jak2 compiles directly; see the "hardcoded cases to
+  grab from jak1" rule in `goal_src/jak2/lib/project-lib.gp:221`), which already
+  writes `(subtitle-speaker ...)`, then wrote it AGAIN at pckernel.gc:842. Both
+  parse into the same field, so harmless — but real dead duplication (visible in
+  the card's own settings file). Removed the second write. jak2's own redundant
+  `subtitle-speaker` parser case (787) left alone — harmless, keeps the diff
+  minimal.
+
+**Verified non-bugs (no changes made):**
+- FALSE LEAD from the earlier session: "jak1 handle-output-settings omits cheats" —
+  wrong. The shared BASE writer omits it, but jak1's `pc-settings-jak1` child writer
+  persists `(cheats known current)` in the `(secrets ...)` group (pckernel.gc:508)
+  and parses it back (466-468). jak1 cheat serialization was never broken; only the
+  debug-menu save trigger was missing (FIX 129).
+- jak1: every cheat has a consumer (sky pckernel.gc:136, tunes flava-hack:135,
+  no-tex gfx-hack:141, mirror, eco, invinc, heads, sidekick-blue); the eco cheats
+  are already mutually exclusive in the debug menu (logclear! pattern); the
+  cheats-known masking itself is intentional anti-cheat and is kept.
+- jak2: writer↔parser key pairs complete (checked both directions); the
+  `(cheats-backup ...)` parse case is a deliberate legacy no-op.
+- The shared base writer/parser (compiled into ALL THREE games) is key-complete.
+
+**Build (validation only — NOT deployed):** `./build-host/goalc/goalc --game jakN --instruction-set arm64 --cmd '(make-group "iso")'`
+- jak1: 546 targets, 0 errors (log `/tmp/goalc_jak1_f129.log`)
+- jak2: 933 targets, 0 errors (log `/tmp/goalc_jak2_f130.log`)
+- New local CGOs (supersets of all prior fixes; the on-card jak2 GAME.CGO is still
+  the FIX 128 one, md5 `9083cc58…`):
+  - `out/jak1/iso/GAME.CGO` md5 `939ffde7e1da806de6bd7d6edf4936c2`
+  - `out/jak2/iso/GAME.CGO` md5 `104e34cc97470c2e30589415c656c393`
+
+**HW test (jak1, after a deploy):** debug menu → PC cheats → toggle e.g. "Big head
+jak" ON → power off → boot → still ON (and it shows unlocked in the in-game secrets
+menu too). Toggle OFF → reboot → OFF.
+
+**jak3 note (for the pending jak3 patch):** jak3 has the SAME duplicate
+subtitle-speaker write at `goal_src/jak3/pc/pckernel.gc:734` (parent call at :716) —
+added to the jak3 patch list. No jak3 files were touched (other agent's build).
+
+Not committed; not deployed (both held for user approval per workflow).
+
+
+## Full-codebase audit — jak1/jak2 GOAL (2026-11-18, AI-assisted)
+
+Scope: every Switch-touched hunk in `goal_src/jak1` + `goal_src/jak2` — all 11 `FIX 1xx`
+markers (104, 126, 127 ×4, 128 ×2, 129, 130), all 15 `(pc-get-os) 'switch` branch hunks,
+the whole pc-settings persistence chain (writers, parsers, commit triggers, cheat-bit
+mutation sites), the speedrun gating, and the debug/progress cheat menus.
+The 1100+ `og:preserve-this`/`PC_PORT` markers are the upstream PC-port scaffolding,
+not Switch changes; the Switch-specific surface above was audited exhaustively.
+
+**Result: no new actionable bugs found.** Everything verified:
+
+- All FIX 104/126/127/128/129/130 hunks re-reviewed line-by-line — logic sound.
+  - FIX 126 OFF-transition: `weather-cheat-state` starts zeroed (GOAL zero-init),
+    snap-to-target only fires on cheat→OFF, good/bad branches and the rain/
+    lightning gates are consistent with it.
+  - FIX 129: all 5 eco/invinc lambdas call `dm-pc-cheat-save!`; helper ORs into
+    `cheats-known` (survives the load-time mask), skips commit in speedrunner mode.
+    Invinc lambda's raw `16` = `(state-flags invulnerable)` bit 4 ✓.
+  - FIX 128: mutual exclusion at BOTH toggle sites (debug menu + secrets menu),
+    each followed by a speedrun-gated `pc-settings-save`.
+- Writer↔parser key parity re-checked mechanically (both games, both directions);
+  remaining deltas are intentional legacy parse stubs (`cheats-backup`,
+  `hint-subtitles?`, old audio/gfx keys) kept because the parser can't skip
+  unknown keys. `subtitle-speaker` is written once by the shared
+  `pckernel-common.gc` writer (the jak2 copy at :842 was the duplicate, FIX 130).
+- jak1 `(cheats known current)` write order matches parser read order.
+- jak2 `pc-cheats` enum ↔ debug-menu flag numbers (1…524288) match exactly;
+  `(/ arg0 8)` is the binteger untag, consistent everywhere.
+- All cheat-bit mutation sites either save immediately or are covered by
+  jak2's frame-diff `update-cheats` save; speedrun paths correctly never persist.
+- `scripts/ai/check-dk.py`: `dk-lint: PASS` (0 files — nothing uncommitted to lint).
+
+**Notes (not fixed — judged intentional/by-design, flag if you disagree):**
+- N1: jak1 debug-menu PC Settings booleans (Letterbox, Skip movies, Money starburst,
+  Subtitles, Hinttitles, subtitle-speaker) flip `*pc-settings*` without a commit;
+  that menu has an explicit "Save" item (default-menu-pc.gc:696), so this matches
+  upstream behavior. Cheats were the deliberate exception (FIX 129, user request).
+- N2: jak1 options-menu L1+R1 `cheats-known` grant (progress-pc.gc:2616-2619)
+  commits only on a later options action; upstream code, harmless in practice.
+- N3: `give-cheat!`/`lock-cheat!` (jak2 pckernel-impl.gc:308/313) are dead macros —
+  zero callers. Upstream; left alone.
+- N4: jak2 mood.gc still `logclear!`s the opposite weather bit every frame while a
+  weather cheat is active — now redundant after FIX 128's toggle-time clearing, but
+  harmless (never triggers a save on its own).
+- jak2 mood/weather, jak3-inherited FIX 130 site and the rest of the jak3 patch
+  list remain deferred until the other agent's jak3 build completes.
+
+Still held for user approval: commit of FIX 128/129/130; SD deploy of the new
+jak1/jak2 CGOs (+ HW tests: jak2 weather sun/rain reboot, jak1 debug-cheat reboot).
+
+
+
+## 2026-11-18 (evening) — JAK3 SESSION: FIX 128/129 weather cheat shipped; J9 aspect root-caused + FIXED (AI-assisted, Cline)
+
+User directive (going out): finish the weather cheat, then do everything that
+doesn't need the user (J7-J10 + any missing rendering/bug work).
+
+### FIX 128/129 — jak3 weather cheat COMPLETE (code + build; commit f67db853)
+mood-h.gc: weather-cheat-state field on mood-control (after clouds). mood.gc
+FIX 129, all inside the og:preserve-this guard: cheat consumption block after
+the game-secrets bad-weather branch (pins current-interp cloud/fog — bad = 1.0
+storm, good = 0.0 clear, restores target-interp on OFF, logclear!s the
+opposite bit), rain pin (good → f30-3 0.0 / bad → unclamped f0-125), lightning
+suppressed while weather-good. default-menu.gc FIX 128: the cheat toggle
+clears the opposite weather bit at toggle time (the persistence killer).
+Full arm64 make-group: 1164 targets, 0 errors.
+
+Also committed in f67db853 (prior session's reviewed work): jak2 FIX 127/128
+mirrors (default-menu.gc + progress-pc.gc), the J11 dkgl blit_prev fix for
+jak3 BLIT_START (menu backdrop), J10 Sizes drop, all handoff/TODO doc entries.
+
+### J9 — "stretched in height" ROOT-CAUSED + FIXED (no user info needed)
+The same bug jak2 had on HW 2026-10-31 (DKGL_TODO #203): dk_device.cpp:684
+picked the non-jak1 y-scale vert blobs only for `g_game_version == Jak2`, so
+jak3's NATIVE world passes (tfrag/tie/shrub/sprite3) ran with the JAK1
+constants (HEIGHT_SCALE 1.0 / SCISSOR 448) and drew ~1.86x too tall, while the
+dkgl-captured buckets (merc2/ocean/shadow — use_jak2_verts() covers every
+non-jak1 game) had the correct 0.5/416 scale — geometry towering over the
+characters reads as "everything stretched". GL-PC (Shader.cpp:68-70) and dkgl
+both treat jak3 as jak2; the native pick now does too (jak2_style = non-jak1,
+Jak1=1 via the forward-declared enum). hfrag — a jak3-ONLY native pass — was
+missing from _JAK2_SHADERS entirely: added (hfrag.vert -> hfrag_vert_jak2_dksh,
+CMake _JAK2_SHADERS + the load pick). jak1/jak2 behavior byte-identical.
+Eliminated on the way (all byte-identical jak2<->jak3, jak2-dk HW-correct):
+settings force, update-video-hacks, math-camera PC block, draw-raw-image
+pillarbox, progress/HUD pages. For the record jak3's authored camera space
+differs (math-camera init x-clip 512/y-pix 208/y-clip 416 vs jak1/2
+1024/112/448) — GL-PC handles jak3 with the shared jak2 constants, so the
+dk pick must match that; if any stretch remains after this fix it will be
+UNIFORM (world+characters together) and the frame composition is next.
+**jak3 NRO: docker 7/7 clean, md5 a346eaa3c02af4cb4793c577f8cbe701**
+(supersedes deployed 30ec435f; the `c561d1b6` note in the J7 row was stale —
+J11 already deployed 30ec435f/65ff6b7e). NOTE: NRO relinks are nondeterministic
+— my re-build of the UNCHANGED tree earlier gave bbb9a871 != 30ec435f; don't
+panic at tree-identical md5 drift, deploy the recorded artifact.
+
+### FIX 130 — jak3 mirror applied
+Same duplicate (subtitle-speaker ...) write at goal_src/jak3/pc/pckernel.gc:734
+(parent writer at :716 already writes it; parser case kept at :676).
+**jak3 GAME.CGO rebuilt: md5 3861ef8b28e891505cdf90a9e1921695** (16,327,504 B;
+FIX 128/129 + J10 + FIX 130) — supersedes 3274cebc AND the deployed 8a1ade2d.
+
+### CONCURRENT SESSION NOTE + FIX-numbering collision
+The jak1/jak2 session is live in this tree (its own handoff sections; its
+jak1 FIX 129 + jak2 FIX 130 source edits are UNCOMMITTED and left alone).
+"FIX 129" now names two different fixes: this session's jak3 weather-mood
+cheat (commit f67db853) and their jak1 debug-cheat persistence (their section
+below). Disambiguate as FIX 129-jak3 / FIX 129-jak1 in future references.
+Their CGO builds superseded mine mid-session: jak2 GAME.CGO is now THEIR
+104e34cc (mine 9083cc58 was transient; their build includes FIX 130-jak2 +
+all committed work).
+
+### DEPLOY CHECKLIST — SD card currently NOT MOUNTED (everything below waits for it)
+1. jak3 NRO build-switch-jak3/game/gk.nro md5 a346eaa3c02af4cb4793c577f8cbe701
+   -> sdmc:/switch/jak3/jak3.nro (rotate old 30ec435f to .bak-30ec435f;
+   desktop copy per convention).
+2. jak3 GAME.CGO out/jak3/iso/GAME.CGO md5 3861ef8b28e891505cdf90a9e1921695
+   -> card data iso dir (rotate 8a1ade2d). Copy ONLY this file — the
+   make-group iso re-created pruned language files; the card jak3 pruning
+   set is still unverified.
+3. jak2 GAME.CGO out/jak2/iso/GAME.CGO md5 104e34cc97470c2e30589415c656c393
+   + TSZ.DGO out/jak2/iso/TSZ.DGO md5 533f0ad04635d423c93577cd511f3283
+   (relink PAIR, rotate c18420bb/c69c0e0a). KERNEL.CGO f6698f65 unchanged.
+   jak2 NRO 65ff6b7e already current on the card.
+4. (Other session, coordinate) jak1 GAME.CGO out/jak1/iso/GAME.CGO
+   md5 939ffde7e1da806de6bd7d6edf4936c2 — their FIX 129-jak1 build, first
+   jak3-side CGO change for jak1; they held deploy for user approval.
+MD5-verify after every copy, remove ._* sidecars, eject clean.
+
+### HW TEST CHECKLIST (user, one sitting)
+(1) jak3 weather cheats: bad ON -> storm/rain/lightning; good ON -> clear sky,
+    rain stops, no lightning; OFF -> normal weather resumes; reboot -> last
+    choice persists; exactly one weather bit on at a time. jak2 same.
+(2) J9: world proportions correct — character vs geometry now consistent
+    (they already matched merc2/ocean). Note handheld vs docked anyway.
+(3) J7: no kickoff-failed 0xd5c spam; [deko3d] gpfifo 1s entries down ~600.
+(4) J11 menu backdrop shows the frame (not sepia); J10 Sizes gone, Resolution
+    readout correct.
+(5) G-3 intro white box: still open (data-lands-late hypothesis) — note when
+    it appears/resolve and keep the log.
+(6) jak1 debug-cheat reboot persistence (other session's FIX 129-jak1).
+
+Left open on purpose: J8 (jak2 soak probes — needs HW), G-3 probe (needs the
+new log), the white-box-during-loading probe (same), jak1 Graphics page port
+(J10 follow-up, awaits user go/no-go).
+
+## Half-res sky: pre-boot static audit + zero-draw guard (AI-assisted, 2026-11-18)
+
+User green-lit the "make the sky cheap" rebuild. Status: the §7.2 half-res sky
+render target (640x360 dkgl FBO, ~4x less 3D fill, composite blit back) is
+already on the card — current jak2 NRO 65ff6b7e includes it (c70467a6c chain),
+deployed by the jak3 session. It has still NEVER run on HW.
+
+This session: full static trace of the record flow (snapshot blit_framebuffer ->
+blit_frame_to_tex segment = HW-proven DepthCue shape; offscreen bind recorded
+in-list by the pending-target flush, ocean pattern; composite blit_to_frame
+carries its own DkBarrier_Full + Image invalidate = P3 covered; read-FBO left
+at 0; tex_image_2d pool-full falls back to full-res). One real edge case found
+and FIXED: a zero-draw sky bucket frame (menus/loads/fades) still composited
+the snapshot back = a 720->360->720 linear round-trip, i.e. whole-frame blur
+where GL is a no-op. sky_halfres_end(bool drew) now skips the composite when
+the bucket emitted no draws; the 10-s stats line gained "nodraw K".
+dk-lint PASS (5 files), check-switch jak2 PASS -> new NRO
+120ea63517bf5fbb9a2e006c22f1d109 (built from the shared tree, so it also
+carries the jak3 agent's uncommitted J9 pick — verified behaviour-neutral for
+jak2: same _jak2_dksh selection, hfrag is a jak3-only pass).
+
+Deploy: SD not mounted during this session — when next inserted, rotate
+jak2.nro 65ff6b7e -> jak2.nro.bak-65ff6b7e, copy
+build-switch-jak2/game/gk.nro (md5 120ea635…), MD5-verify, purge ._* sidecars.
+Then the HW check list for the half-res sky: boot log shows
+"[dkgl] sky half-res on"; Dead Town/Haven sky looks right (orientation,
+colours, alpha, no blur); gpu top b5 ~1-1.5 ms (was ~3); no gun-course-haze /
+warp-red-cone regression (they read the frame the composite writes); 10-s
+line "sky halfres N fail 0 nodraw K" (nodraw > 0 on menus is expected and
+fine). A/B: sdmc:/switch/jak2/gk_dkgl_fullsky.txt (reboot).
+
+Next perf levers if still short of locked 60 after the sky lands: gpufence
+3-4 ms (CPU/GPU overlap, parked), ocean b6/b310 CPU (parked).
+
+## 2026-11-18 19:30 — FULL THREE-GAME REDEPLOY (user: "build again and push all the new ones") (AI-assisted, Cline)
+
+Rebuilt EVERYTHING with the working tree as it stands (both sessions' work:
+commits 0e115874..17f78a48 PLUS the still-uncommitted other-session WIP —
+FIX 131 TexturePool slot-guard + probe additions 853/929/2929/3090,
+Loader.cpp/dk_renderer.cpp/dkgl_frame.cpp follow-ups, jak1 FIX 129
+default-menu-pc.gc, jak2 FIX 130 pckernel.gc).
+- GOAL arm64 make-group iso: all 3 OK, 0 errors (deterministic: jak1
+  GAME 939ffde7, jak2 GAME 104e34cc, jak3 GAME 3861ef8b match prior builds).
+- Docker NROs all OK, 0 errors (jak1 was a FULL 744-object rebuild — its
+  build dir was cold): jak1 e516a69b3e790ec48c5c6db4f96b06a9,
+  jak2 1cd2c518357eeea471a336844530fa31, jak3 6426abe090fe252956db6f9cf24464d6.
+  NRO md5s differ from prior records = relink nondeterminism + new content,
+  as expected.
+- Full-tree md5 diff out/jakN/iso vs card = jak1: ENGINE.CGO+GAME.CGO;
+  jak2: GAME.CGO+TSZ.DGO (pair, KERNEL.CGO f6698f65 still identical);
+  jak3: GAME.CGO only. TSZ.DGO relinked again (9be8c134 — the pair shipped
+  together).
+DEPLOYED to SD (rotated old NROs to .bak-eb13960b/.bak-65ff6b7e/
+.bak-30ec435f), md5-verified every file ON the card post-copy, no ._*
+sidecars, ejected clean. Card now carries:
+  jak1.nro e516a69b + ENGINE d2947045 + GAME 939ffde7
+  jak2.nro 1cd2c518 + GAME 104e34cc + TSZ 9be8c134
+  jak3.nro 6426abe0 + GAME 3861ef8b
+The other session's WIP is STILL UNCOMMITTED (deliberately — its session
+owns the commit decision).
+HW test order (one sitting): jak3 weather cheats + J9 aspect + intro
+white-box watch; jak2 weather + FIX 131 black-walls (watch gk_run_log for
+FIX131 slot-guard-hold lines + the new probe pages); jak1 debug-cheat
+persistence (FIX 129-jak1).

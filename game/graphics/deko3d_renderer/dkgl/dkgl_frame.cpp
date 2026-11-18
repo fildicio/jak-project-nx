@@ -1393,7 +1393,7 @@ bool flag(const char* name) {
 u32 s_sky_fbo = 0, s_sky_tex = 0;   // GL objects, created on first use (distort pattern)
 int s_sky_w = 0, s_sky_h = 0;       // current half-res target size
 int s_sky_fullres = -1;             // gk_dkgl_fullsky.txt: 1 = keep the full-res path
-u64 s_sky_halfres_frames = 0, s_sky_halfres_fail = 0;
+u64 s_sky_halfres_frames = 0, s_sky_halfres_fail = 0, s_sky_halfres_nodraw = 0;
 
 void sky_make_objects() {
   gen_framebuffers(1, &s_sky_fbo);
@@ -1453,16 +1453,25 @@ bool sky_halfres_begin() {
 }
 
 // Called right after the sky renderer ran: back to the frame target and queue the composite
-// blit (replayed at record time, after the bucket's draw list).
-void sky_halfres_end() {
+// blit (replayed at record time, after the bucket's draw list). `drew` = the bucket emitted at
+// least one draw this frame; a zero-draw frame must NOT composite: GL leaves the frame
+// untouched, while round-tripping it through the half-res target (720 -> 360 -> 720, linear)
+// would blur the whole frame. Menus/loads/fades hit this path.
+void sky_halfres_end(bool drew) {
   bind_framebuffer(0);  // leaves the sky FBO: T106 marks its texture rendered-to
-  const u32 dk = materialized_dk_tex(s_sky_tex);
-  if (dk != 0) {
-    const DkImageRect src{0, 0, 0, (u32)s_sky_w, (u32)s_sky_h, 1};
-    const DkImageRect dst{0, 0, 0, (u32)s_fb_w, (u32)s_fb_h, 1};
-    s_emitter.blit_tex_to_frame(dk, src, dst, true);
+  if (!drew) {
+    // GL no-op frame: skip the composite (the downscale snapshot already ran and is
+    // harmless -- the offscreen image is scratch nobody samples this frame).
+    s_sky_halfres_nodraw++;
   } else {
-    s_sky_halfres_fail++;
+    const u32 dk = materialized_dk_tex(s_sky_tex);
+    if (dk != 0) {
+      const DkImageRect src{0, 0, 0, (u32)s_sky_w, (u32)s_sky_h, 1};
+      const DkImageRect dst{0, 0, 0, (u32)s_fb_w, (u32)s_fb_h, 1};
+      s_emitter.blit_tex_to_frame(dk, src, dst, true);
+    } else {
+      s_sky_halfres_fail++;
+    }
   }
   // the queued frame-target switch is handled by the reopened segment's frame_target flag
   pending_target_consumed();
@@ -1517,9 +1526,9 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
     r->render(dma, s_srs.get(), prof);
   }
   // §7.2 half-res sky: back to the frame target + queue the composite blit (replayed after
-  // this bucket's draw list, before the next segment).
+  // this bucket's draw list, before the next segment). A zero-draw bucket is a GL no-op.
   if (sky_halfres) {
-    sky_halfres_end();
+    sky_halfres_end(draw_count() != draws_before);
   }
   // Row P (AI-assisted): like OpenGLRenderer FIX 43, never leave a background sampler bound
   // into the next bucket or the texture animator; it overrides their texture wrap/filter
@@ -3151,7 +3160,7 @@ void capture_end() {
         "[dkgl] ocean %llu frames | segs %u+%u | data %u/%u KB ubo %u/%u KB high | fails "
         "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
-        "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu",
+        "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu nodraw %llu",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
         (unsigned)s_lists[std::max(
              0,
@@ -3173,7 +3182,7 @@ void capture_end() {
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
         (unsigned long long)s_glow_bad, (unsigned long long)s_distort_draws,
         (unsigned long long)s_distort_bad, (unsigned long long)s_sky_halfres_frames,
-        (unsigned long long)s_sky_halfres_fail);
+        (unsigned long long)s_sky_halfres_fail, (unsigned long long)s_sky_halfres_nodraw);
     // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
     // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
     // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData
