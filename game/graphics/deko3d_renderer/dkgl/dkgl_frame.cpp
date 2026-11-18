@@ -848,8 +848,16 @@ class SwitchEmitter final : public Emitter {
     seg.blit_src = src;
     seg.blit_dst = dst;
     seg.blit_linear = linear;
-    seg.blit_prev = s_bucket_ids == s_jak2_ids &&
-                    s_bucket_ids[s_cur_bucket] == (int)jak2::BucketId::BUCKET_3;
+    // §7.0 C (jak2 BUCKET_3) + the jak3 menu backdrop (BLIT_START, registered in
+    // init_jak3): the copy is captured before the current frame is drawn, so it
+    // must replay from LAST frame's presented image -- without blit_prev it
+    // copies the not-yet-drawn current frame target and the backdrop shows the
+    // sepia tint only (the "yellow menu background" on jak3 HW, NRO 9e7a86a2).
+    seg.blit_prev =
+        (s_bucket_ids == s_jak2_ids &&
+         s_bucket_ids[s_cur_bucket] == (int)jak2::BucketId::BUCKET_3) ||
+        (s_bucket_ids == s_jak3_ids &&
+         s_bucket_ids[s_cur_bucket] == (int)jak3::BucketId::BLIT_START);
     s_lists[s_cur_bucket].segs.push_back(seg);
     open_segment(frame);
   }

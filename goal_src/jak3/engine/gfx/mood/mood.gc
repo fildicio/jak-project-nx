@@ -1491,6 +1491,49 @@
         (set! (-> this current-interp cloud) 1.0)
         (set! (-> this current-interp fog) 1.0)
         )
+      (#when PC_PORT ;; og:preserve-this
+        ;; FIX 129 (Switch): jak3 port of jak2's FIX 126. The pc-cheats
+        ;; weather-bad / weather-good bits were togglable in the debug menu
+        ;; (FIX 127) but never consumed here -- dead cheats. Pin
+        ;; current-interp exactly like the game-secrets branch above does
+        ;; (bad = full storm, good = clear sky), and track the active cheat
+        ;; state so the OFF transition snaps current-interp back to the
+        ;; level's natural target instead of lingering through seek!'s slow
+        ;; 1/speed-interp recovery (30-120 real seconds of leftover storm).
+        ;; Note: unlike jak2, this sits outside the paused/override guard,
+        ;; matching the secrets branch -- the render path below prefers
+        ;; `overide` during scripted weather, so this never fights a movie.
+        (let ((new-cheat-state
+                (the-as int
+                  (cond
+                    ((pc-cheats? (-> *pc-settings* cheats) weather-good) 2)
+                    ((pc-cheats? (-> *pc-settings* cheats) weather-bad) 1)
+                    (else 0)
+                    )
+                  )
+                )
+              )
+          (when (and (!= new-cheat-state (-> this weather-cheat-state))
+                     (zero? new-cheat-state)
+                     )
+            (set! (-> this current-interp cloud) (-> this target-interp cloud))
+            (set! (-> this current-interp fog) (-> this target-interp fog))
+            )
+          (set! (-> this weather-cheat-state) new-cheat-state)
+          )
+        (cond
+          ((pc-cheats? (-> *pc-settings* cheats) weather-good)
+            (set! (-> this current-interp cloud) 0.0)
+            (set! (-> this current-interp fog) 0.0)
+            (logclear! (-> *pc-settings* cheats) (pc-cheats weather-bad))
+            )
+          ((pc-cheats? (-> *pc-settings* cheats) weather-bad)
+            (set! (-> this current-interp cloud) 1.0)
+            (set! (-> this current-interp fog) 1.0)
+            (logclear! (-> *pc-settings* cheats) (pc-cheats weather-good))
+            )
+          )
+        )
       (let* ((s4-2 this)
              (f30-2 (if (and (-> s4-2 overide-weather-flag) (and (not (movie?)) (= (-> s4-2 current-special-interp) 0.0)))
                         (-> this overide cloud)
@@ -1509,10 +1552,26 @@
         (let* ((f0-125 (fmax 0.0 (fmin (* 4.0 (fmax 0.0 (+ -0.5 f26-2)) (fmax 0.0 (+ -0.5 f30-2))) f28-2)))
                (f30-3 (fmin 0.75 f0-125))
                )
+          (#when PC_PORT ;; og:preserve-this
+            ;; FIX 129 (Switch): weather-good silences the rain, weather-bad
+            ;; pins it to the full unclamped amount (jak2 FIX 126 parity).
+            (cond
+              ((pc-cheats? (-> *pc-settings* cheats) weather-good)
+                (set! f30-3 0.0)
+                )
+              ((pc-cheats? (-> *pc-settings* cheats) weather-bad)
+                (set! f30-3 f0-125)
+                )
+              )
+            )
           (set! (-> *setting-control* user-default rain) f30-3)
           (level-get-target-inside *level*)
           (cond
-            ((and (< 0.0 (-> *setting-control* user-current rain)) (!= *master-mode* 'progress))
+            ((and (< 0.0 (-> *setting-control* user-current rain)) (!= *master-mode* 'progress)
+                  ;; FIX 129 (Switch): never generate lightning while
+                  ;; weather-good is active (jak2 FIX 126 parity).
+                  (#if PC_PORT (not (pc-cheats? (-> *pc-settings* cheats) weather-good)) #t) ;; og:preserve-this
+                  )
              (gen-lightning-and-thunder! this (the-as int a1-12))
              (cond
                ((zero? (-> this rain-id))

@@ -1018,6 +1018,23 @@
   (debug-menu-append-item (debug-menu-find-from-template *debug-menu-context* '("Artist")) (debug-menu-make-anim-tester-x-menu *debug-menu-context*))
 
   )
+;; Switch (AI-assisted): drop the debug "PC Settings > Sizes" menu (same fix as
+;; jak1/jak2). deko3d always renders at the native panel size (720p handheld /
+;; 1080p docked), so none of these sizes can take effect -- worse, picking one
+;; on the console pushes a display-mode change that can resize the nwindow
+;; swapchain (display_manager.cpp). The read-only "Resolution W/H" readout
+;; above it stays.
+(when (and (-> *debug-menu-context* root-menu) (= (pc-get-os) 'switch))
+  (let ((pc-menu (debug-menu-find-from-template *debug-menu-context* '("PC Settings")))
+        (sizes-item (the-as pair #f)))
+    (when pc-menu
+      (dolist (it (-> pc-menu items))
+        (if (string= (-> (the-as debug-menu-node (car it)) name) "Sizes")
+          (set! sizes-item it)))
+      (when sizes-item
+        (set! (-> pc-menu items) (delete! (car sizes-item) (-> pc-menu items)))
+        (debug-menu-rebuild pc-menu)))))
+
 
 ;; (defun bg-custom ((level-name symbol))
 ;;   "Modified version of bg for the PC Port custom levels."

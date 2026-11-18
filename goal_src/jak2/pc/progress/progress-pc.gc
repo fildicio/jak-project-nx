@@ -1162,6 +1162,24 @@
                           ((= (-> cheat can-toggle) #t)
                             ;; known cheat, unlocked, toggleable
                             (logxor! (-> *pc-settings* cheats) (-> cheat flag))
+                            ;; FIX 128 (Switch): the two weather cheats are
+                            ;; mutually exclusive. The mood code only clears
+                            ;; the opposite bit after unpausing, so a
+                            ;; lingering Bad Weather bit survived a Nice
+                            ;; Weather selection and came back on every boot.
+                            ;; Clear the opposite bit right here so the last
+                            ;; weather choice is the one that persists.
+                            (when (and (= (-> cheat flag) (pc-cheats weather-bad))
+                                       (pc-cheats? (-> *pc-settings* cheats) weather-bad))
+                              (logclear! (-> *pc-settings* cheats) (pc-cheats weather-good)))
+                            (when (and (= (-> cheat flag) (pc-cheats weather-good))
+                                       (pc-cheats? (-> *pc-settings* cheats) weather-good))
+                              (logclear! (-> *pc-settings* cheats) (pc-cheats weather-bad)))
+                            ;; FIX 127 companion (Switch): persist the toggle
+                            ;; immediately (same rule as the debug-menu cheat
+                            ;; page). Skipped in speedrunner mode.
+                            (when (not (-> *pc-settings* speedrunner-mode?))
+                              (pc-settings-save))
                             (sound-play "generic-beep")
                             )
                           ((= (-> cheat can-toggle) 'auto)

@@ -262,6 +262,10 @@
    (colors                  mood-color-table    3)
    (channels                mood-channel-group  3)
    (clouds                  mood-clouds         9)
+   ;; FIX 129 (Switch): pc weather cheat the mood process last applied:
+   ;; 0 = none, 1 = weather-bad, 2 = weather-good. Used to detect the OFF
+   ;; transition and restore current-interp (see mood.gc).
+   (weather-cheat-state     int32)
    )
   (:methods
     (init-weather! (_type_) none)

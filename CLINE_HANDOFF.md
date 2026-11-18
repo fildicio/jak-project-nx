@@ -1845,8 +1845,292 @@ create `gk_dkgl_nopooldefer.txt` on the card to fall back without redeploying.
 Expect: during a real area transition the defer log shows a handful of pages held
 ~120 frames then released — if it shows hundreds held continuously or `tex live`
 keeps climbing over a long session, shrink the window or move to option 3.
+## 2026-11-19 — FIX 127: debug-menu cheat toggles persist (jak2+jak3) (AI-assisted, Cline)
+
+**User report (follow-up to FIX 126):** "Bad Weather" toggled OFF in the OpenGOAL
+Cheats debug menu comes back ON (rain) after a game restart.
+
+**Root cause (GOAL, persistence — not rendering):**
+`dm-game-opengoal-cheat-toggle-pick-func` flips the cheat bit in
+`(-> *pc-settings* cheats)` in memory only. The one auto-persister,
+`update-cheats` (jak2 `pckernel.gc:704` / jak3 `pckernel.gc:597`), calls
+`pc-settings-save` only when the cheat bitfields change *within a single frame's*
+loop (`old` captured at the top of the same call) — a debug-menu toggle happens
+*between* frames, so the OFF is never detected and the file is never rewritten.
+Any earlier settings save (frame rate, pause-menu cheat page, PC Settings Save,
+boot-time default write) that captured the cheat ON stays in `pc-settings.gc`;
+`load-settings` at boot (`pckernel-common.gc:675`) restores it → rain back.
+Serialization itself is fine: `cheats` is written (`pckernel.gc:837`) and parsed
+(`pckernel.gc:780`). FIX 126 fixed the visual snap-back only.
+
+**Fix (GOAL only, no C++):** in both
+`goal_src/jak2/engine/debug/default-menu.gc` and
+`goal_src/jak3/engine/debug/default-menu.gc`,
+`dm-game-opengoal-cheat-toggle-pick-func` now calls `(pc-settings-save)` right
+after the `logxor!`, guarded by `(not (-> *pc-settings* speedrunner-mode?))` to
+match `update-cheats`'s rule that speedrun cheat modifications are never
+persisted. All 19 cheats on that page (weather-bad/good, turbo-board, etc.) now
+persist on toggle.
+
+**Build/deploy (GOAL arm64, `make-group "iso"`, no NRO change):**
+jak2 933 targets clean → GAME.CGO `80a3f9f9a62d3c34ab937dda23b6d61e`
+(was `c18420bb…`); jak3 1164 targets clean → GAME.CGO
+`325dff0f8c40a0395914754f26c55831` (was `8a1ade2d…`). Both copied to
+card `data/out/<game>/iso/GAME.CGO`, md5 re-verified after `sync`. Pre-FIX127
+pairs backed up in `~/Desktop/jak bakcups/2026-11-19-fix127-cheatpersist/`
+(jak2 `c18420bb…`, jak3 `8a1ade2d…`). `check-dk.py` PASS.
+
+**HW test:** toggle weather-bad OFF → exit → power off → boot → weather stays
+clear; `pc-settings.gc` on card should show `(cheats …)` without the
+weather-bad bit. Same spot-check for weather-good ON.
+
+## 2026-11-19 — FIX 125 + FIX 126: pool window widened 60 s; weather cheat unstick (AI-assisted, Cline)
+
+**FIX 124 hardware verdict (gk_run_log, Nov 19):** the deferral fired exactly as
+designed — transition at 42.6 s deferred 40 pages (drawn 1–87 frames ago), idle
+ones released at 43.7–48.7 s, and "47 still held" are pages the active level
+keeps drawing continuously (correct: they stay alive and render). BUT the black
+walls still come back: the same pages get drawn again ~35 s after release
+(`[sprtex] MISS tbp=930 pc=1021/9` at 85.3 s after `deferred unload done` at
+48.7 s) → placeholder → black. 120 frames (2 s) of idle protection is too short
+for pages the active level draws intermittently (camera/fog/streaming sectors).
+
+**FIX 125 (C++):** idle window 120 → `TexturePool::kPoolDeferFrames` = 3600
+frames (~60 s), still set at pool creation (`dk_renderer.cpp`, kill-switch
+`gk_dkgl_nopooldefer.txt` unchanged). `Loader::update` (FIX 125 block) drops
+the window to `kPoolDeferFramesPressure` (120) while
+`loader_under_pressure() || dktexgpu::failed_allocs() > 0`, so a tight dk
+texture heap still reclaims in seconds; one-shot probe
+`[loader] FIX125 pressure: pool defer window 3600 -> 120 frames`. Boot log now
+reads `[dk] pool defer unload ON (FIX124/125, 3600 frames)`. Desktop/kill-switch
+behavior byte-identical to before. Expect after a transition: pages held up to
+~60 s then released; if `tex live`/`mem` climbs unbounded over a long session,
+the pressure fallback is the lever to watch.
+
+**FIX 126 (GOAL, jak2 only — user-reported "OpenGOAL cheat Bad Weather stuck"):**
+root cause in `mood.gc`: the weather-cheat cond pins `current-interp`
+cloud/fog directly (1.0 bad / 0.0 good) every frame, but nothing restores them
+when the cheat is toggled OFF — recovery relies on `seek!` toward
+`target-interp` at `1/speed-interp`, speed 30–120 → up to 2 minutes of lingering
+storm. The debug-menu toggle itself is correct (the `/ 8` in
+`dm-game-opengoal-cheat-toggle-pick-func` is fixnum untagging, bit 17/18 match
+`pc-cheats`). Fix: new `mood-control` field `weather-cheat-state` (`mood-h.gc`,
+0 = none / 1 = bad / 2 = good); the mood process tracks it and on the OFF
+transition snaps `current-interp` cloud/fog back to `target-interp`
+(instant). Cheats still persist via the settings file (`cheats` u64) — toggling
+off then saving is the way to clear it across boots, same as before.
+
+
+## 2026-11-18 — MENU PARITY: jak3 debug-menu Sizes drop (J10) (AI-assisted, Cline)
+
+Follow-up to the menu-parity verification (jak2↔jak3 pause Graphics pages
+byte-identical; jak1 still on the old PC-style `*graphic-options-pc*`; debug menus
+jak1/jak2 drop "Sizes" on Switch, jak3 kept it + added the Resolution W/H readout).
+
+**Why jak3's Sizes picker is not cosmetic:** picking a size pushes a display-mode
+change that can resize the nwindow swapchain (`display_manager.cpp:224`) — the
+hazard the jak1/jak2 drop closes. deko3d renders at the native panel size
+(720p handheld / 1080p docked); no size option can take effect.
+
+**Change (GOAL only, no C++):** ported the byte-equivalent of jak2
+`goal_src/jak2/pc/debug/default-menu-pc.gc:1096` into jak3
+`goal_src/jak3/pc/debug/default-menu-pc.gc` (top-level `when` after the menu
+build, line ~1021): on Switch (`(= (pc-get-os) 'switch)`) find the "PC Settings"
+menu, `delete!` the "Sizes" item, `debug-menu-rebuild`. The read-only
+"Resolution W/H" readout above it stays (jak3-only nicety).
+
+**Build:** incremental `./build-host/goalc/goalc --game jak3 --instruction-set arm64 --cmd '(make-group "iso")'` — 1164 targets, 0 errors
+(`/tmp/goalc_jak3_dmfix.log`), `default-menu-pc.gc` recompiled (38% mark).
+
+**Artifact:** `out/jak3/iso/GAME.CGO` — 16,325,936 B, md5
+`8a1ade2d1c56d08362b93a3ee1a85275`. **Supersedes the undeployed `72fc92e6`**
+(last session's readout-only build); still pairs with the undeployed J7 NRO
+`c561d1b664e672bb4a08655281f9860e` — deploy the two together when the SD card
+is back. TRAP: `(make-group "iso")` re-creates any pruned language files —
+re-check before the SD sync (jak1/jak2 lists in the f100 entry; jak3 pruning
+status unknown — verify on the card).
+
+**Awaiting user go/no-go (proposed, not started):** (a) jak1 Graphics page →
+Switch-appropriate options + window-size readout — a real port into jak1's old
+menu system, not copy-paste; (b) Resolution W/H int-vars + `pc-get-window-size`
+31-frame refresh into jak1/jak2 debug menus; (c) nothing more for jak3's menus.
+If approved, all three GAME.CGOs rebuild (jak1's first ever). J9 (jak3 vertical
+stretch) still awaits the user's location/handheld-vs-docked answer.
 
 **Not done / follow-ups:** `[merctex]` placeholder probe deferred (the defer
 log already names suspect pages via tex_probe_page); option 3 (evict far
 levels only) not needed unless the 120-frame window proves too generous.
 
+
+## 2026-11-18 — MENU PARITY: jak3 debug-menu Sizes drop (J10) (AI-assisted, Cline)
+
+Follow-up to the menu-parity verification (context: jak2↔jak3 pause Graphics pages
+byte-identical; jak1 still on the old PC-style `*graphic-options-pc*`; debug menus
+jak1/jak2 drop "Sizes" on Switch, jak3 kept it + added the Resolution W/H readout).
+
+**Why jak3's Sizes picker is not cosmetic:** picking a size pushes a display-mode
+change that can resize the nwindow swapchain (`display_manager.cpp:224`) — the
+hazard the jak1/jak2 drop closes. deko3d renders at the native panel size
+(720p handheld / 1080p docked); no size option can take effect.
+
+**Change (GOAL only, no C++):** ported the byte-equivalent of jak2
+`goal_src/jak2/pc/debug/default-menu-pc.gc:1096` into jak3
+`goal_src/jak3/pc/debug/default-menu-pc.gc` (top-level `when` after the menu
+build, line ~1021): on Switch (`(= (pc-get-os) 'switch)`) find the "PC Settings"
+menu, `delete!` the "Sizes" item, `debug-menu-rebuild`. The read-only
+"Resolution W/H" readout above it stays (jak3-only nicety).
+
+**Build:** incremental `./build-host/goalc/goalc --game jak3 --instruction-set
+arm64 --cmd '(make-group "iso")'` — 1164 targets, 0 errors
+(`/tmp/goalc_jak3_dmfix.log`), `default-menu-pc.gc` recompiled (38% mark).
+
+**Artifact:** `out/jak3/iso/GAME.CGO` — 16,325,936 B, md5
+`8a1ade2d1c56d08362b93a3ee1a85275`. **Supersedes the undeployed `72fc92e6`**
+(last session's readout-only build); still pairs with the undeployed J7 NRO
+`c561d1b664e672bb4a08655281f9860e` — deploy the two together when the SD card
+is back. TRAP: `(make-group "iso")` re-creates any pruned language files —
+re-check before the SD sync (jak1/jak2 lists in the f100 entry; jak3 pruning
+status unknown — verify on the card).
+
+**Awaiting user go/no-go (proposed, not started):** (a) jak1 Graphics page →
+Switch-appropriate options + window-size readout — a real port into jak1's old
+menu system, not copy-paste; (b) Resolution W/H int-vars + `pc-get-window-size`
+31-frame refresh into jak1/jak2 debug menus; (c) nothing more for jak3's menus.
+If approved, all three GAME.CGOs rebuild (jak1's first ever). J9 (jak3 vertical
+stretch) still awaits the user's location/handheld-vs-docked answer.
+
+
+## 2026-11-18 (16:00–16:50) — SD BACK: FULL DEPLOY J11 (both games) + jak3 yellow-menu fix (AI-assisted, Cline)
+
+User report on the OLD card build (jak3 NRO `9e7a86a2`, GAME.CGO `2e84919a`):
+(1) menu shows a **yellow background** when pressed (title→menu backdrop),
+(2) a **white box** during first-start loading. Diagnosis from the card's
+`gk_run_log.txt` (log kept, timestamps Nov 19 = Switch clock):
+
+**Yellow menu = jak3 blit_prev never enabled.** `dkgl_frame.cpp:851` set
+`seg.blit_prev` only for jak2 (`s_bucket_ids == s_jak2_ids && BUCKET_3`); the
+jak3 `BlitDisplays` at `BLIT_START` (registered in `init_jak3`, comment already
+said "blit_prev: reads last frame's image") always replayed as
+`dkdev::blit_frame_to` = the not-yet-drawn current frame target → backdrop
+empty, sepia tint only. Log corroboration: `[dkgl] … blit bad` 1/frame from
+title on (60 at 60 frames, 6314 by 4860). **Fix:** the condition now also
+matches `s_bucket_ids == s_jak3_ids && s_cur_bucket id == jak3::BLIT_START` →
+replays via `dkdev::blit_prev_frame_to` (game-agnostic, jak2-proven HW path).
+`check-dk.py` PASS. dk-lint PASS.
+
+**White box during first-start loading:** prime suspect = FIX 124/125 class
+(Loader evicts pages still drawn; the card NRO predated FIX124) — the pending
+NRO includes it. Sprites never missed (`sprite frame … no_tex=0` all session),
+so not a skipped sprite batch; if it persists on the new build, next probe =
+name the dkgl bucket behind the `notex` (~2–13/frame) stale-binding draws, and
+check the intro `PC-WARP` entry (`[sprtex] tbp=1216 id=0 … PC-WARP/PC-WARP`,
+15.9 s — pc-port texture with no dktexgpu id, warp quad untextured) and the
+`introcst-spritethrust-glob` placeholder misses at tbp=1152 (transient, data
+lands late). **Awaiting HW re-test.**
+
+**Deployed (all md5s verified on card after copy):**
+- jak3: NRO `30ec435fd1bf9865edfc1754b4ce1b63` (docker clean 69/69; supersedes
+  `c561d1b6` — adds the blit_prev fix on top of FIX124/125 + J7) + GAME.CGO
+  `8a1ade2d1c56d08362b93a3ee1a85275` (J10). Whole iso tree verified
+  byte-identical local↔card, KERNEL.CGO `2cab49e7` — only the NRO changed.
+- jak2: NRO `65ff6b7e336dc4f7a65a5800ce45f3bd` + GAME.CGO
+  `c18420bb05d7d2088e8dcd48a2ab7da7` + TSZ.DGO `c69c0e0a56626818fcc3c1ef2756400a`
+  (relink pair, KERNEL.CGO `f6698f65` already matched).
+- Backups (6 files) in `~/Desktop/jak bakcups/2026-11-18-j11-blitfix/`
+  (old jak3 9e7a86a2/2e84919a, jak2 80ff1eb3/8da29cac/0efa34e0).
+
+**ANOMALY — concurrent jak2 build:** the local jak2 pair was rebuilt at
+16:42–16:44 by something other than this session (no docker/build process of
+mine; my build was jak3-only and build-switch.sh never touches `out/*/iso`).
+The artifacts match the current tree (FIX124/125/126 + J7 + the blit_prev edit,
+behaviour-neutral for jak2), so they were deployed. If the user has a second
+agent/session running, coordinate before the next build; the summary's
+`d2b7a47d`/`e5ff3989` md5s were stale — the 16:42/16:44 build supersedes them.
+Language files recreated by the jak2 `make-group iso` were NOT copied
+(card stays pruned; verified `NOT-ON-CARD` set is exactly VAGWAD.*/SCREEN1.*
+languages + `*COMMON.TXT`).
+
+**HW test checklist (jak3 first):** (1) boot sanity into city; (2) title →
+press Start: menu backdrop should now show the captured frame, not yellow;
+(3) pause menu same check; (4) first-start loading: white box gone? (if not,
+note WHEN it appears and keep the log — probe next); (5) debug PC Settings:
+Sizes gone, Resolution W/H readout correct handheld/docked; (6) pause Graphics
+regression; (7) J7: no `kickoff failed res=0xd5c`, `[deko3d] gpfifo 1s:` count
+down ~600; (8) J9 stretch observation (where + handheld/docked). jak2 quick
+pass: warp/blackout OK, Bad Weather cheat off now clears instantly (FIX 126),
+gpfifo check.
+
+
+## 2026-11-18 (17:00) — ADDENDUM (FIX 125/126 session, Cline)
+
+Cross-reference for the J11 entry above: the "concurrent jak2 build" it noticed was
+**this session** — the 16:42 docker NRO build (64/64 clean, /tmp/fix125_build.log) and
+the 16:44 goalc arm64 `make-group iso` (933 targets, 11.5 s, **mood.gc/mood-h.gc
+compiled clean** → GAME.CGO `c18420bb…`). Both artifacts were then independently
+deployed twice (two sessions racing on the card at ~16:45) — final card state
+re-verified serially: jak2.nro `65ff6b7e336dc4f7a65a5800ce45f3bd`, GAME.CGO
+`c18420bb05d7d2088e8dcd48a2ab7da7`.
+
+Note on the `GAME.CGO.bak-8da29cac` anomaly: the backup rotation misfired because
+the J11 whole-iso copy had already written the new GAME.CGO to the card; the true
+pre-FIX126 rollback copy is in `~/Desktop/jak bakcups/2026-11-18-j11-blitfix/`
+(md5 verified `8da29cac…`). The redundant duplicate created here was removed from
+the card; card now holds live GAME.CGO + f01/f02 baks only. Rollback order for jak2
+GAME.CGO: Desktop `8da29cac` (pre-FIX126) → card `f02.bak` (Nov 4).
+
+`check-dk.py` PASS after the final tree state. Committed: TexturePool.h, Loader.cpp,
+dk_renderer.cpp (FIX 125) + mood.gc/mood-h.gc (FIX 126). This handoff file is left
+uncommitted (shared with the in-progress jak3 session's J11 entry).
+
+## 2026-11-18 (Mac clock) — FIX 128: weather selection persists (jak2, sun survives reboot) (AI-assisted, Cline)
+
+**User report:** "I select the sun, save, reboot — it rains again."
+
+**Root cause (from the card's own settings file):**
+`/Volumes/SWITCH SD/switch/jak2/OpenGOAL/jak2/settings/pc-settings.gc` had
+`cheats #x2404b` = weather-bad (0x20000) ON + weather-good (0x40000) OFF.
+Serialization + boot restore were both CORRECT (FIX 127 works — the other bits
+prove it); the saved state itself was wrong. Only the in-level mood code
+(`mood.gc`, FIX 126) cleared the opposite weather bit, and only AFTER
+unpausing — so a lingering weather-bad bit survived a "weather-good"
+selection made while paused, and every boot restored the storm.
+
+**Fix (GOAL, jak2 only; jak3 deferred by user):**
+- `engine/debug/default-menu.gc` `dm-game-opengoal-cheat-toggle-pick-func`:
+  the two weather flags are now mutually exclusive AT TOGGLE TIME — toggling
+  weather-bad ON clears weather-good and vice versa (the newly selected one
+  wins), then FIX 127's immediate `pc-settings-save` persists exactly that.
+- `pc/progress/progress-pc.gc` pause-menu Cheats page: same mutual exclusion
+  after its `logxor!`, plus the same guarded immediate save (speedrunner mode
+  skipped) — pause-menu toggles previously relied on update-cheats' frame
+  diff only.
+- **Card settings fixed directly:** `cheats #x2404b` → `cheats #x4404b`
+(weather-bad OFF, weather-good ON = sun selected). The very next boot is
+sunny with no user action needed. All other bits preserved.
+
+**Build/deploy (GOAL arm64, `make-group "iso"`, 933 targets, 0 errors; no NRO
+change needed — pure GOAL):**
+- Deployed jak2 GAME.CGO `9083cc5878545fd3c81ca4d8f284c9f6` (card md5
+  verified after copy + sync, `._GAME.CGO` purged). KERNEL.CGO unchanged
+  `f6698f65`. NRO unchanged `65ff6b7e`.
+- **Anomaly:** the card's pre-deploy GAME.CGO was `80a3f9f9a62d3c34ab937dda23b6d61e`,
+  NOT the `c18420bb…` recorded in the FIX 127 entry — some other build was
+  deployed after that handoff. The `80a3f9f9` copy (rollback) is saved at
+  `~/Desktop/jak bakcups/2026-11-18-weather-fix128/GAME.CGO.pre-f128.bak`
+  (md5 verified). The new GAME.CGO is built from the current tree, so it is
+  a superset of everything committed here.
+
+**HW test:** boot jak2 → should be SUNNY immediately (settings already set).
+Then: toggle weather-bad ON (rain) → power off → boot → still rain; toggle
+weather-good ON (sun) → boot → sun. The last selection always wins and the
+menu shows exactly one weather flag ON at a time.
+
+**jak3 deferred (user: "then we think about jak 3"):** jak3's toggle func and
+SD file are fine (FIX 127 present, `cheats 0x0` on card), but jak3's
+`mood.gc` never consumes the weather cheat bits — they are dead cheats
+(no `pc-cheats` reference in `goal_src/jak3/engine/gfx/mood/`). A jak3 fix
+needs the FIX-126-style mood port (pin cloud/fog + rain on bad, clear on
+good, plus the lightning guard) in jak3's mood code, which has a DIFFERENT
+structure from jak2's (different locals/seek pattern — not a blind copy).
+
+Not committed yet (held for user approval per workflow).

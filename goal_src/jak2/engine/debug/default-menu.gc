@@ -2961,7 +2961,34 @@
 ;; og:preserve-this added
 (defun dm-game-opengoal-cheat-toggle-pick-func ((arg0 int) (arg1 debug-menu-msg))
   (if (= arg1 (debug-menu-msg press))
-      (logxor! (-> *pc-settings* cheats) (the-as uint (/ arg0 8)))
+      (begin
+        (let ((bit (the-as uint (/ arg0 8))))
+          (logxor! (-> *pc-settings* cheats) bit)
+          ;; FIX 128 (Switch): the two weather cheats are mutually exclusive.
+          ;; Previously only the in-level mood code cleared the opposite bit,
+          ;; and only after unpausing -- so a lingering weather-bad bit (e.g.
+          ;; left ON from an earlier test) survived a weather-good selection,
+          ;; the saved cheat bits kept Bad Weather ON, and every boot came
+          ;; back rainy no matter which weather the user picked. Now the
+          ;; toggle itself clears the opposite weather bit, so the last
+          ;; weather choice is the one that persists.
+          (when (and (= bit (the-as uint (pc-cheats weather-bad)))
+                     (pc-cheats? (-> *pc-settings* cheats) weather-bad))
+            (logclear! (-> *pc-settings* cheats) (pc-cheats weather-good)))
+          (when (and (= bit (the-as uint (pc-cheats weather-good)))
+                     (pc-cheats? (-> *pc-settings* cheats) weather-good))
+            (logclear! (-> *pc-settings* cheats) (pc-cheats weather-bad)))
+          )
+        ;; FIX 127 (Switch): persist the toggle immediately. update-cheats only
+        ;; calls pc-settings-save when the cheat bits change *within* a single
+        ;; frame, so a debug-menu toggle (which happens between frames) was
+        ;; never written to pc-settings.gc -- the last previously-saved value
+        ;; (e.g. Bad Weather ON) came back on every boot. Skipped in speedrunner
+        ;; mode, matching update-cheats' rule that speedrun cheat modifications
+        ;; are never persisted.
+        (when (not (-> *pc-settings* speedrunner-mode?))
+          (pc-settings-save))
+        )
       )
   (logtest? (-> *pc-settings* cheats) (/ arg0 8))
   )
