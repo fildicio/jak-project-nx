@@ -566,7 +566,10 @@ if(NINTENDO_SWITCH)
                       dkgl/etie.vert dkgl/etie_base.vert
                       # T127: both stages of the distorter differ (vert HEIGHT_SCALE,
                       # frag SCISSOR_HEIGHT)
-                      dkgl/sprite_distort.vert dkgl/sprite_distort.frag)
+                      dkgl/sprite_distort.vert dkgl/sprite_distort.frag
+                      # J9 (AI-assisted): hfrag is a jak3-only native pass; its vert
+                      # baked the jak1 y-scale and drew the mountains ~1.86x too tall.
+                      hfrag.vert)
     set(_JAK2_OUTS "")
     foreach(_sh ${_JAK2_SHADERS})
         string(REPLACE "." "_" _nm ${_sh})

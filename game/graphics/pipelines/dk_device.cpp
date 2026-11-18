@@ -51,6 +51,7 @@
 #include "dksh/ocean_mipmap_vert_dksh.h"  // FIX 112
 #include "dksh/ocean_mipmap_frag_dksh.h"
 #include "dksh/hfrag_vert_dksh.h"   // T113
+#include "dksh/hfrag_vert_jak2_dksh.h"  // J9: non-jak1 y-scale (the pass is jak3-only)
 #include "dksh/hfrag_frag_dksh.h"
 #include "dksh/hfrag_montage_vert_dksh.h"  // T113
 #include "dksh/hfrag_montage_frag_dksh.h"
@@ -680,20 +681,30 @@ bool init(int fb_width, int fb_height) {
   // means the 2D splash still works via the GL-path fallback, so the device is still usable).
   {
     uint32_t code_off = 0;
-    // Jak 2 needs its own y-scale in the background/character vertex shaders.
-    const bool jak2 = g_game_version == static_cast<GameVersion>(2);  // Jak2
-    const uint8_t* tfrag3_v = jak2 ? tfrag3_vert_jak2_dksh : tfrag3_vert_dksh;
-    const uint32_t tfrag3_vsz = jak2 ? tfrag3_vert_jak2_dksh_size : tfrag3_vert_dksh_size;
-    const uint8_t* shrub_v = jak2 ? shrub_vert_jak2_dksh : shrub_vert_dksh;
-    const uint32_t shrub_vsz = jak2 ? shrub_vert_jak2_dksh_size : shrub_vert_dksh_size;
-    const uint8_t* etie_v = jak2 ? etie_vert_jak2_dksh : etie_vert_dksh;
-    const uint32_t etie_vsz = jak2 ? etie_vert_jak2_dksh_size : etie_vert_dksh_size;
-    const uint8_t* merc2_v = jak2 ? merc2_vert_jak2_dksh : merc2_vert_dksh;
-    const uint32_t merc2_vsz = jak2 ? merc2_vert_jak2_dksh_size : merc2_vert_dksh_size;
-    const uint8_t* etie_base_v = jak2 ? etie_base_vert_jak2_dksh : etie_base_vert_dksh;
-    const uint32_t etie_base_vsz = jak2 ? etie_base_vert_jak2_dksh_size : etie_base_vert_dksh_size;
-    const uint8_t* sprite3_v = jak2 ? sprite3_vert_jak2_dksh : sprite3_vert_dksh;
-    const uint32_t sprite3_vsz = jak2 ? sprite3_vert_jak2_dksh_size : sprite3_vert_dksh_size;
+    // J9 (AI-assisted, 2026-11-18): the non-jak1 y-scale (HEIGHT_SCALE 0.5 /
+    // SCISSOR_HEIGHT 416) is shared by jak2 AND jak3 -- GL's Shader.cpp:68-70 keys it
+    // on `version == Jak1 ? ... : ...`, and dkgl's use_jak2_verts() runs for every
+    // non-jak1 game. This native pick only tested Jak2, so jak3's tfrag/tie/shrub/
+    // merc2/sprite3 natives kept the JAK1 y-scale and the whole world drew ~1.86x too
+    // tall ("stretched in height", JAK3_BRINGUP_TODO J9) while the dkgl-captured
+    // merc2/ocean/shadow buckets drew with the correct jak2 scale -- the same
+    // mismatch jak2 itself had on HW 2026-10-31 (DKGL_TODO #203, fixed by these
+    // _jak2_dksh variants). (Jak1 = 1 -- versions.h only forward-declares the enum
+    // in this TU, so no enumerator names here; see the top of this file.)
+    const bool jak2_style = g_game_version != static_cast<GameVersion>(1);  // Jak2 + Jak3
+    const uint8_t* tfrag3_v = jak2_style ? tfrag3_vert_jak2_dksh : tfrag3_vert_dksh;
+    const uint32_t tfrag3_vsz = jak2_style ? tfrag3_vert_jak2_dksh_size : tfrag3_vert_dksh_size;
+    const uint8_t* shrub_v = jak2_style ? shrub_vert_jak2_dksh : shrub_vert_dksh;
+    const uint32_t shrub_vsz = jak2_style ? shrub_vert_jak2_dksh_size : shrub_vert_dksh_size;
+    const uint8_t* etie_v = jak2_style ? etie_vert_jak2_dksh : etie_vert_dksh;
+    const uint32_t etie_vsz = jak2_style ? etie_vert_jak2_dksh_size : etie_vert_dksh_size;
+    const uint8_t* merc2_v = jak2_style ? merc2_vert_jak2_dksh : merc2_vert_dksh;
+    const uint32_t merc2_vsz = jak2_style ? merc2_vert_jak2_dksh_size : merc2_vert_dksh_size;
+    const uint8_t* etie_base_v = jak2_style ? etie_base_vert_jak2_dksh : etie_base_vert_dksh;
+    const uint32_t etie_base_vsz =
+        jak2_style ? etie_base_vert_jak2_dksh_size : etie_base_vert_dksh_size;
+    const uint8_t* sprite3_v = jak2_style ? sprite3_vert_jak2_dksh : sprite3_vert_dksh;
+    const uint32_t sprite3_vsz = jak2_style ? sprite3_vert_jak2_dksh_size : sprite3_vert_dksh_size;
     bool vert_ok = load_shader(&s_splashVsh, splash_vert, splash_vert_size, &code_off);
     bool frag_ok = load_shader(&s_splashFsh, splash_frag, splash_frag_size, &code_off);
     s_have_shaders = vert_ok && frag_ok;
@@ -907,9 +918,14 @@ bool init(int fb_width, int fb_height) {
     }
     // T113 (AI-assisted): hfrag pair (the distant mountain terrain), loaded
     // after the ocean pairs, before ETIE_BASE (which stays last by design).
+    // J9 (AI-assisted): hfrag only draws on jak3, but its vert baked the jak1
+    // y-scale -- pick the shared non-jak1 variant like every other world vert.
     {
+      const uint8_t* hfrag_v = jak2_style ? hfrag_vert_jak2_dksh : hfrag_vert_dksh;
+      const uint32_t hfrag_vsz =
+          jak2_style ? hfrag_vert_jak2_dksh_size : hfrag_vert_dksh_size;
       DkshHeader vh, fh;
-      memcpy(&vh, hfrag_vert_dksh, sizeof(vh));
+      memcpy(&vh, hfrag_v, sizeof(vh));
       memcpy(&fh, hfrag_frag_dksh, sizeof(fh));
       uint32_t v_off = align_up(code_off, DK_SHADER_CODE_ALIGNMENT);
       uint32_t f_off = align_up(v_off + vh.code_sz, DK_SHADER_CODE_ALIGNMENT);
@@ -917,7 +933,7 @@ bool init(int fb_width, int fb_height) {
       if (end > kCodePool) {
         switch_run_logf("[dk] hfrag shader code overflow (%u/65536)", end);
       } else {
-        bool sv = load_shader(&s_hfragVsh, hfrag_vert_dksh, hfrag_vert_dksh_size, &code_off);
+        bool sv = load_shader(&s_hfragVsh, hfrag_v, hfrag_vsz, &code_off);
         bool sf = load_shader(&s_hfragFsh, hfrag_frag_dksh, hfrag_frag_dksh_size, &code_off);
         s_have_hfrag = sv && sf;
         switch_run_logf("[dk] hfrag shaders %s, code used %u KB", s_have_hfrag ? "ok" : "FAILED",
