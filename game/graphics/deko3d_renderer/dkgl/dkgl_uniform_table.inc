@@ -248,6 +248,19 @@ inline constexpr UniformSlot kSlots_sprite_distort_vert[] = {
 inline constexpr UniformSlot kSlots_sprite_distort_frag[] = {
     {nullptr, 0, 0},
 };
+inline constexpr UniformSlot kSlots_simple_texture_vert[] = {
+    {"tex_coord_0", 0, 16},
+    {"tex_coord_1", 16, 16},
+};
+inline constexpr UniformSlot kSlots_simple_texture_frag[] = {
+    {"color", 0, 16},
+};
+inline constexpr UniformSlot kSlots_slow_time_vert[] = {
+    {"amount", 0, 16},
+};
+inline constexpr UniformSlot kSlots_slow_time_frag[] = {
+    {nullptr, 0, 0},
+};
 
 inline constexpr ProgramUniformTable kProgramUniformTables[] = {
     { "ocean_common",
@@ -370,6 +383,16 @@ inline constexpr ProgramUniformTable kProgramUniformTables[] = {
           { kSlots_sprite_distort_vert, 1, 16 },
       // frag
           { kSlots_sprite_distort_frag, 0, 0 }, },
+    { "simple_texture",
+      // vert
+          { kSlots_simple_texture_vert, 2, 32 },
+      // frag
+          { kSlots_simple_texture_frag, 1, 16 }, },
+    { "slow_time",
+      // vert
+          { kSlots_slow_time_vert, 1, 16 },
+      // frag
+          { kSlots_slow_time_frag, 0, 0 }, },
 };
 
 }  // namespace dkgl

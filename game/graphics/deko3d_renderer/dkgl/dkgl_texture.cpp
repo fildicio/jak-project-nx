@@ -5,11 +5,15 @@
 // the dk frame target; a bound offscreen FBO is an emitter target switch, no GL work.
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>  // FIX 136: access() for the A/B flag files
 #include <unordered_map>
 #include <vector>
 
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_gl_enums.h"
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_state.h"
+#include "game/switch/run_log.h"  // #J12: blit probe logs (host-safe no-op off Switch)
+#include "common/versions/versions.h"  // FIX 136: game_version_names
+#include "game/runtime.h"               // FIX 136: g_game_version
 
 #if defined(__SWITCH__)
 // same seam pair TexturePool.cpp includes for the T23 check (plain headers)
@@ -98,6 +102,22 @@ void dk_failed_upload() {
 }
 #endif
 u64 g_unsupported_blit_count = 0;  // T112
+// FIX 136 (AI-assisted, J13 jak3 visuals): blits replayed through the new read-FBO
+// directions, so the HW log can see the flag engage (blit bad should drop by the same
+// rate revblit climbs).
+u64 g_rev_blit_count = 0;
+// FIX 136 (AI-assisted): A/B flag, same file-on-SD pattern as the J12 probes. Absent =
+// the exact pre-FIX-136 reject behaviour (every read-FBO blit fails).
+bool rev_blit_enabled() {
+  static int s_on = -1;
+  if (s_on < 0) {
+    char path[96];
+    snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_dkgl_revblit.txt",
+             game_version_names[g_game_version]);
+    s_on = access(path, F_OK) == 0 ? 1 : 0;
+  }
+  return s_on != 0;
+}
 u64 g_respecify_count = 0;         // T112: level-0 tex_image_2d with new dims/format
 u64 g_tex_sub_count = 0;           // §7.0 D: tex_sub_image_2d calls (tfrag tod palettes)
 u64 g_bad_sub_rect_count = 0;      // §7.0 D: tex_sub_image_2d with a non-top-left rect
@@ -461,6 +481,16 @@ bool blit_framebuffer(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int 
     TexObj* d = f ? tex_by_gl(f->depth_attached) : nullptr;
     if (g_read_fbo != 0 || !d || !d->depth || d->renderbuffer || g_frame_depth_tex == 0) {
       ++g_unsupported_blit_count;
+#if defined(__SWITCH__)
+      // #J12 probe (AI-assisted): budgeted by gk_dkgl_blitprobe.txt on the SD.
+      if (blit_probe_take()) {
+        switch_run_logf(
+            "[dkgl] blit probe: depth-unmet (read_fbo %u bound_fbo %u d %d renderbuf %d "
+            "frame_depth %u)",
+            (unsigned)g_read_fbo, (unsigned)g_bound_fbo, d ? 1 : 0, d ? (int)d->renderbuffer : -1,
+            (unsigned)g_frame_depth_tex);
+      }
+#endif
       return false;
     }
     d->was_rendered_to = true;
@@ -469,14 +499,71 @@ bool blit_framebuffer(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int 
   }
   // DepthCue: frame (read FBO 0) -> its sample texture, colour, no flip.
   TexObj* t = f ? tex_by_gl(f->attached_tex) : nullptr;
+  // FIX 136 (AI-assisted, J13 jak3 visuals): the two directions dkgl used to reject --
+  // read-FBO -> frame (draw target 0) and read-FBO -> draw-FBO. The jak3 counters named
+  // them (blit bad ~2.4/frame from the very first frame, jak2: 0 -- the GL renderers blit
+  // BETWEEN their own offscreen targets: the minimap re-publish, the sky blend, the warp
+  // copy-back family) and dkgl dropped every one, leaving those effects' targets stale.
+  // Rects pass through unconverted, the same convention the frame->tex path proved on HW.
+  // A/B flag gk_dkgl_revblit.txt; absent = the old reject behaviour, unchanged.
+  if (rev_blit_enabled() && g_read_fbo != 0 && mask == gl::COLOR_BUFFER_BIT && sx1 > sx0 &&
+      sy1 > sy0 && dx1 > dx0 && dy1 > dy0 && sx0 >= 0 && sy0 >= 0 && dx0 >= 0 && dy0 >= 0) {
+    FboObj* rf = fbo_by_id(g_read_fbo);
+    TexObj* src = (rf && rf->attached_tex) ? tex_by_gl(rf->attached_tex) : nullptr;
+    // depth attachments never replay as colour (GL would reject the format mismatch too)
+    if (src && !src->depth) {
+      const u32 dk_src = materialize(*src, rf->attached_tex);
+      Emitter* e = dk_src != 0 ? emitter() : nullptr;
+      if (e) {
+        const DkImageRect srect{(u32)sx0, (u32)sy0, 0, (u32)(sx1 - sx0), (u32)(sy1 - sy0), 1};
+        const DkImageRect drect{(u32)dx0, (u32)dy0, 0, (u32)(dx1 - dx0), (u32)(dy1 - dy0), 1};
+        if (f == nullptr) {
+          // read-FBO -> frame: composite the offscreen image into the frame target.
+          // blit_to_frame's own Full barriers cover the source read + the frame write.
+          e->blit_tex_to_frame(dk_src, srect, drect, filter == gl::LINEAR);
+          ++g_rev_blit_count;
+          return true;
+        }
+        TexObj* dst = tex_by_gl(f->attached_tex);
+        if (dst && !dst->depth) {
+          const u32 dk_dst = materialize(*dst, f->attached_tex);
+          if (dk_dst != 0) {
+            e->blit_tex_to_tex(dk_src, dk_dst, srect, drect, filter == gl::LINEAR);
+            dst->was_rendered_to = true;  // the first draw sampling it gets the T106 barrier
+            dst->barrier_done = false;
+            ++g_rev_blit_count;
+            return true;
+          }
+        }
+      }
+    }
+  }
   if (g_read_fbo != 0 || !t || mask != gl::COLOR_BUFFER_BIT || sx1 <= sx0 || sy1 <= sy0 ||
       dx1 <= dx0 || dy1 <= dy0 || sx0 < 0 || sy0 < 0 || dx0 < 0 || dy0 < 0) {
     ++g_unsupported_blit_count;
+#if defined(__SWITCH__)
+    // #J12 probe (AI-assisted): budgeted by gk_dkgl_blitprobe.txt on the SD. The
+    // jak3 "blit bad" is ~2.4/frame (jak2: 0) -- most likely BlitDisplays' copier
+    // (frame -> the PC-BLIT texture at 0x3300) or its copy-back form.
+    if (blit_probe_take()) {
+      switch_run_logf(
+          "[dkgl] blit probe: color-cond (read_fbo %u bound_fbo %u f %d t %d mask %x) "
+          "src %d,%d-%d,%d dst %d,%d-%d,%d",
+          (unsigned)g_read_fbo, (unsigned)g_bound_fbo, f ? 1 : 0, t ? 1 : 0, (unsigned)mask, sx0,
+          sy0, sx1, sy1, dx0, dy0, dx1, dy1);
+    }
+#endif
     return false;
   }
   const u32 dk = materialize(*t, f->attached_tex);
   if (dk == 0) {
     ++g_unsupported_blit_count;
+#if defined(__SWITCH__)
+    if (blit_probe_take()) {
+      switch_run_logf("[dkgl] blit probe: materialize failed (bound_fbo %u, tex %u)",
+                      (unsigned)g_bound_fbo, (unsigned)f->attached_tex);
+    }
+#endif
     return false;
   }
   const DkImageRect src{(u32)sx0, (u32)sy0, 0, (u32)(sx1 - sx0), (u32)(sy1 - sy0), 1};
@@ -490,6 +577,25 @@ bool blit_framebuffer(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int 
 }
 u64 unsupported_blit_count() {
   return g_unsupported_blit_count;
+}
+// FIX 137 (AI-assisted): live counts for note_table_full's occupancy line.
+u32 live_tex_count() {
+  u32 n = 0;
+  for (u32 i = 0; i < kMaxTextures; ++i) {
+    n += g_textures[i].live ? 1u : 0u;
+  }
+  return n;
+}
+u32 live_fbo_count() {
+  u32 n = 0;
+  for (u32 i = 0; i < kMaxFbos; ++i) {
+    n += g_fbos[i].live ? 1u : 0u;
+  }
+  return n;
+}
+// FIX 136 (AI-assisted, J13): blits replayed through the new read-FBO directions.
+u64 rev_blit_count() {
+  return g_rev_blit_count;
 }
 // T129a (AI-assisted): glGenerateMipmap. The TextureAnimator composites each frame into
 // the FBO target's level 0 and then regenerates the chain; dkgl allocated the whole mip

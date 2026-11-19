@@ -33,7 +33,10 @@ PROGRAMS = ["ocean_common", "ocean_envmap", "ocean_envmap_haze",
             # T126: GL GlowRenderer (jak2 light glows) through dkgl
             "glow_depth_copy", "glow_probe_on_grid", "glow_probe_downsample", "glow_draw",
             # T127: GL Sprite3::render_distorter (jak2 scattergun heat haze) through dkgl
-            "sprite_distort"]
+            "sprite_distort",
+            # FIX 138: BlitDisplays' end-of-frame effects through dkgl -- FullScreenTexDraw
+            # (zoom-blur old/new composite + the color filter) and SlowTimeEffect.
+            "simple_texture", "slow_time"]
 
 HEIGHT_SCALE = "1.0"        # jak1 (Shader.cpp)
 SCISSOR_HEIGHT = "448.0"    # jak1 (Shader.cpp)

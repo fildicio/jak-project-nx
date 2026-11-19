@@ -35,7 +35,7 @@ Rule: everything below is done through the **dkgl wrapper** (see `AI_ROLES.md`,
 |---|---|---|---|
 | 5 | Shine on orbs / metal (merc envmap, "emerc") | GL `Merc2` runs through dkgl on the 8 merc buckets; only the `emerc` program is in the dkgl table, so normal merc stays native (MercDk) and only the envmap draws reach the GPU, replayed right after native merc. Adds `glBindBufferRange(GL_UNIFORM_BUFFER)` (bones, binding 1), Loader buffer ids via `set_external_buffer_lookup`, and a null guard for the missing EyeRenderer in `Merc2.cpp`. Opt-out: `gk_dkgl_noemerc.txt`. Seen working on hardware 2026-10-27. Since #19 the normal merc draws (`merc2` program) also run through dkgl | ✅ |
 | 6 | Screen fade to black (cutscenes, loads) | GL `FullScreenDraw` + `solid_color` through dkgl (`record_blackout`, after the HUD) | ✅ |
-| 7 | Brightness / contrast (PCRTC) | jak1: no-op (GOAL never calls it). Do it with jak3 | — |
+| 7 | Brightness / contrast (PCRTC) | ✅ done for all games | jak1 GOAL never calls `pc-set-brightness-contrast` (no-op there). jak3 does (`blit-displays.gc:656`), and the dk path has had it since commit `b9e479fc8`: `pc_set_brightness_contrast` (kmachine) → `g_global_settings` → `dkdev::set_pcrtc` (`dk_renderer.cpp`) → `record_pcrtc()` inside `present_frame` (`dk_device.cpp`, `rgb = image.rgb * alpha + add` over the whole frame). This row was stale — nothing left to build |
 | 8 | Dock / undock resize | works like GL: the swapchain stays at the boot size (GL FIX 73c) and the Switch scales the image when docked. A native-resolution resize is deferred (risky, costs GPU time) | ✅ same as GL |
 
 ## 3. Close the hardware checks
@@ -58,7 +58,7 @@ Rule: everything below is done through the **dkgl wrapper** (see `AI_ROLES.md`,
 | # | Item | Status |
 |---|---|---|
 | 14 | jak2: reuse the native deko3d renderers where they already work, run the remaining GL bucket renderers through dkgl, add the missing dkgl programs (`shadow2`, `tex_anim`, ...) and TextureAnimator support — full list in §7. **tex_anim + TextureAnimator landed 2026-11-06 (T125, AI-assisted): the UNCHANGED GL animator runs through dkgl** (details in §7 item 3). **Glow landed 2026-11-06 (T126, AI-assisted):** the native T124 glow port (wrong strip order, no occlusion = flares through walls) was removed; the UNCHANGED GL `GlowRenderer` (new_mode: depth copy, probe grid, downsample, additive draw) runs through dkgl from the SpriteDk jak2 glow section into a `kGlowList` side list, called right after sprite bucket 313. dkgl gained depth textures (alias of the frame depth image, no copy), Z24S8 renderbuffers, depth attachments, vertex-stage sampling; side lists no longer replay twice from the world loop. A/B: `gk_dkgl_noglow.txt` (glow ✅ HW: skull gems + dark eco fixed). **Distort T127** (scatter gun) through dkgl, y-scale fix HW pending. What is left: §7.0 | 🟡 |
-| 15 | jak3: same as jak2, plus PCRTC brightness | ⏳ |
+| 15 | jak3: same as jak2, plus PCRTC brightness | 🟡 | PCRTC brightness was already done (see row 7 — the row was stale). What was actually missing for jak3 was the BlitDisplays end-of-frame effects (0x11 copy-back / 0x13 zoom blur / 0x14 color filter / 0x15 slow-time) — **FIX 138** wired them through dkgl behind `gk_dkgl_copyback.txt` (details: `JAK3_BRINGUP_TODO.md` J15). Remaining: the same HW checklist as jak2 (distort haze, tex_anim on-screen, shadow2, tie proto-vis) + the J7 perf bring-up |
 
 **jak3 slow motion below 60 fps — ✅ DONE, HW verified 2026-11-04 (GAME.CGO `efb5481f`, stable 30 fps).** Original note: `pc-maybe-vsync` in
 `goal_src/jak3/engine/draw/drawable.gc` (~line 2248) still returns a fixed `1.0`, so every frame
@@ -374,9 +374,62 @@ does. Waiting for #10 before coding serializes work that can overlap.
    (`sky halfres N fail M nodraw K`). NRO `120ea635` (check-switch PASS, dk-lint PASS; includes
    the jak3 agent's uncommitted J9 y-scale pick, verified behaviour-neutral for jak2:
    `g_game_version != 1` selects the same `_jak2_dksh` variants, hfrag is a jak3-only pass).
-   **Not deployed — SD card not mounted; deploy with rotation when next inserted, then the
-   same HW checks as `9d7727d7` apply (sky orientation/colours/alpha, b5 ~1-1.5 ms in
-   `gpu top`, no gun-course-haze / warp-cone regression).**
+   **HW verified 2026-11-18 (deployed NRO `1cd2c518`, built from the committed tree incl. the
+   zero-draw guard session's work):** `sky halfres 60/660/1260 fail 0`, `gpu top` b5 1.13-2.83 ms
+   (was 5.8-8.7 full-res), most 10-s windows `0 over 16.7`. Sky render target is DONE for
+   jak2 -- remaining wobble is tie/shrub (see the perf TODO below).
+   **FIX 132 (2026-11-18, AI-assisted) -- the abysmal-framerate hardware regression was NOT the
+   sky, it was the texture-pool probe.** The FIX 123/131 `tex_probe_page` diagnostic list
+   (998/2405/1021/1325 + 853/929/2929/3090) contains hot pages: 1021/853/2929 link every
+   frame, so `[pool] link` logging emitted **2.06M lines / a 91 MB `gk_run_log.txt`** in one
+   session while `gpu top` stayed healthy -- render-thread snprintf + mutex + SD flushes at
+   ~11k lines/s were the entire cost. `tex_probe_page` now returns false (probe retired; the
+   FIX 131 slot-guard it was probing for is committed, evidence archived in
+   `hw-logs/jak2-probe-flood-20261118/gk_run_log.txt.gz`, 91 MB -> 7.7 MB). Rule: never leave
+   hot pages in the probe list in a deploy build.
+   **FIX 133 (2026-11-18, AI-assisted) -- the walls regression was still live: the slot guard
+   yielded to GEOMETRY pressure, not texture pressure.** The probe-flood log proved the
+   t=168.9 s `unload 853/*` mass unload fired right after a `FIX125 pressure` line, while
+   `[dk] tex ... fail=0` the whole session: `loader_under_pressure()` is the staging BUFFER
+   pool (< 16 MB, routine during any level stream -- the lwidea upload at t=166 s), and the
+   old wiring let it drop the FIX 131 slot guard to 3600 frames, killing draw-idle-but-linked
+   page 853 (ruins) with no re-give ever following. The guard now yields ONLY when the texture
+   heap itself is failing (`dktexgpu::failed_allocs()` is monotonic -> delta vs last-seen
+   count; a chronically-full store keeps failing retries and stays pressured, a one-off
+   failure yields for a single update); buffer pressure keeps governing only the FIX 125
+   draw-stamp defer window, which cannot blacken a linked page. Diagnostics restored safely:
+   `[pool] give/unload/placeholder-new/FIX124-done` now log unconditionally (rare, event-
+   driven, bounded by level streams) -- only the per-frame `[pool] link` lines stay behind the
+   retired probe, so give/unload pairs remain auditable without re-arming any hot page.
+   **FIX 134 (2026-11-18, AI-assisted) -- the save-menu picture regression was the half-res
+   sky, and the zero-draw guard could never see it.** In menu mode `sky-tng.gc` (line ~869)
+   draws the frozen-frame backdrop (bucket-3 capture, tbp `#x4c0`) + tint + filter overlay
+   INSIDE the SKY_DRAW bucket -- 3 full-screen quads, so the bucket always "drew"
+   (`nodraw 1` the whole session) and the 720->360->720 round-trip blurred the whole menu
+   backdrop (and the title screen's). The half-res path now stays off when the PREVIOUS sky
+   bucket's draw count <= 8 (menu ~3, in-game sky = 20+; the decision must precede the
+   renderer run, so one menu-entry frame rides at half-res behind the progress-interp
+   fade-in, invisible). Stats line gained `menu K` (`sky halfres N fail M nodraw K menu L`).
+   HW check: save-menu picture sharp again, `menu` counter climbs in menus/title only, b5 in
+   `gpu top` still 1-3 ms during gameplay.
+   **FIX 135 (2026-11-19, AI-assisted) -- the save-menu picture broke again: FIX 134's
+   detector is one frame late at menu ENTRY.** The card still ran the FIX 134 NRO
+   (`ea61ea4b`, never re-verified on the save screen): entering the pause/save menu from
+   gameplay, the previous sky count is 20+, so the entry frame -- the exact frame whose
+   frozen image the menu captures and draws as the picture -- rode the 720->360->720
+   round-trip; the "invisible behind the fade-in" claim was wrong because the capture side
+   (`fx-copy-buf` bucket-3 PC_PORT 0x10 + the warp `0x4c0` copy at bucket 317) bakes that
+   frame's blur in for the whole menu session. GOAL gives a perfect same-frame signal:
+   bucket 3 runs BEFORE the sky bucket and the fx-copy-buf capture fires only on the
+   menu-entry frame (`blit-displays.gc`: menu-mode && !screen-copied), so the queued
+   jak2 BUCKET_3 `blit_prev` segment now sets `s_sky_menu_entry`, which forces the entry
+   frame's sky full-res too (`sky_menu = prev<=8 || s_sky_menu_entry`; cleared in
+   `capture_begin`). New `late J` stat in the dkgl stats line: frames where half-res DID
+   run but the sky bucket turned out menu-sized (drew <= 8) -- an exemption miss that
+   still blurs (e.g. a save screen whose own sky exceeds the threshold, or the menu quads
+   landing a frame after the capture). HW check: save-menu picture sharp when entered
+   BOTH from gameplay and from title; `menu` climbs at every menu entry now; if `late`
+   climbs while the picture is broken, raise `kSkyMenuDrawMax` / add the retro-skip.**
    **Slow-mo fix (2026-11-01, GAME.CGO `f8765700`, HW pending):** `pc-maybe-vsync` in
    `goal_src/jak2/engine/draw/drawable.gc` now returns the measured frame time as the dog-ratio
    (jitter < 1.15 -> 1.0, max 4.0), like the PS2 display-sync, so drops below 60 no longer slow

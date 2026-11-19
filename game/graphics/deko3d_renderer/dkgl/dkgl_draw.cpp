@@ -15,6 +15,7 @@
 
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_gl_enums.h"
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_state.h"
+#include "game/switch/run_log.h"  // #J12: notex probe logs (host-safe no-op off Switch)
 
 namespace dkgl {
 namespace {
@@ -737,6 +738,13 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
   }
   if (n_bound_units == 0) {
     ++g_no_texture_draws;
+#if defined(__SWITCH__)
+    // #J12 probe (AI-assisted): which bucket issues the zero-sampler draws (~46/frame
+    // in jak3, 0 in jak2). Budgeted by gk_dkgl_notexprobe.txt on the SD.
+    if (notex_probe_take()) {
+      switch_run_logf("[dkgl] notex probe: zero-sampler draw in bucket %d", cur_bucket_id());
+    }
+#endif
   }
 
   // 9b. TODO #5 (AI-assisted): glBindBufferRange(GL_UNIFORM_BUFFER) ranges (Merc2 bones,

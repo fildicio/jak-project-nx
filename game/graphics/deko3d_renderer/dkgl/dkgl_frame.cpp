@@ -116,6 +116,10 @@ extern float g_shadow2_darken_scale;  // Shadow2.cpp (gk_dkgl_darkshadow.txt)
 #include "dksh/dkgl_glow_probe_on_grid_vert_dksh.h"
 #include "dksh/dkgl_sprite_distort_frag_dksh.h"  // T127: Sprite3 distorter (heat haze)
 #include "dksh/dkgl_sprite_distort_vert_dksh.h"
+#include "dksh/dkgl_simple_texture_frag_dksh.h"  // FIX 138: BlitDisplays end-of-frame
+#include "dksh/dkgl_simple_texture_vert_dksh.h"  // effects (zoom-blur / color filter)
+#include "dksh/dkgl_slow_time_frag_dksh.h"  // FIX 138: SlowTimeEffect (jak3 slow-time)
+#include "dksh/dkgl_slow_time_vert_dksh.h"
 // jak2 screen constants (HEIGHT_SCALE 0.5, SCISSOR_HEIGHT 416), see game/CMakeLists.txt
 #include "dksh/dkgl_direct_basic_textured_vert_jak2_dksh.h"
 #include "dksh/dkgl_direct_basic_vert_jak2_dksh.h"
@@ -205,6 +209,21 @@ int s_src_probe_frames = 0;  // capture frames in which run_gpu logs source miss
 int s_src_probe_budget = 0;  // max miss lines per window
 u64 s_eyeprobe_at = 0, s_eyeprobe_last = 0, s_eyeprobe_rounds = 0;
 
+// #J12 map probe (AI-assisted), gated by gk_dkgl_mapprobe.txt on the SD: the jak3 HUD
+// minimap renders off-screen into the ProgressRenderer FBO ("PC-MAP", fbp 126 ->
+// VRAM 4032; minimap.gc's frame-1 sets :fbp (-> *map-texture-base* vram-page) and the
+// no-"Unknown fbp" HW log proves that address still lands on jak2's 126/4032 pair),
+// then the HUD samples it inside the circular frame. If the off-screen capture or the
+// texture re-publish breaks, the square map content ends up wrong while the circle
+// frame stays put -- the "circle on one side, square on the other" report. This
+// copies the 128x128 FBO texture after the frame's dkgl lists ran and logs a content
+// summary with the same two-present safety as the eye probe.
+dkpool::PoolBuffer s_mapprobe_buf;
+DkFence s_mapprobe_fence;
+bool s_mapprobe_armed = false;
+bool s_mapprobe_on = false;
+u64 s_mapprobe_at = 0, s_mapprobe_last = 0, s_mapprobe_rounds = 0;
+
 struct Segment {
   DkCmdList list = 0;
   bool frame_target = false;  // the caller re-binds the frame target before calling it
@@ -218,6 +237,9 @@ struct Segment {
   // §7.2 half-res sky (AI-assisted): the reverse direction -- blit_dst_tex is the SOURCE
   // image, copied into the frame colour target (the sky composite). No list.
   bool blit_to_frame = false;
+  // FIX 136 (AI-assisted, J13): the FBO -> FBO direction -- blit_src_tex is the SOURCE
+  // image, blit_dst_tex the destination (glBlitFramebuffer with both fbos nonzero).
+  u32 blit_src_tex = 0;
   // T129a (AI-assisted): glGenerateMipmap -- level L-1 -> L blits inside blit_dst_tex.
   // blit_src holds the level-0 rect; the replay halves it per level.
   u32 blit_mips = 0;
@@ -248,6 +270,13 @@ constexpr int kGlowList = 1002;
 // T127 (AI-assisted): the Sprite3 distorter (scattergun heat haze) draws into its own list;
 // record_distort() calls it right BEFORE the native sprite bucket (GL render_jak2 order).
 constexpr int kDistortList = 1003;
+// FIX 138 (AI-assisted): BlitDisplays' end-of-frame effects (do_copy_back -- the 0x11
+// copy-back restore, do_zoom_blur, do_slow_time). GL runs them from OpenGLRenderer::render
+// AFTER every bucket and BEFORE do_pcrtc_effects; dkgl captures them at capture_end into
+// this list and record_copy_back() replays it right before record_blackout(), the same
+// position. A/B flag: gk_dkgl_copyback.txt (absent = the pendings are never consumed, the
+// exact pre-FIX-138 behavior).
+constexpr int kCopyBackList = 1004;
 constexpr int kJak1Buckets[] = {4,  10, 11, 17, 18, 24, 30, 45, 46, 47, 48, 49, 50, 51,
                                 52, 53, 54, 55, 56, 58, 59, 61, 62, 63, 64, kBlackoutList};
 // 48 / 51 (pris-tex) only run the level NPC eyes found there (PrisTexEyes, #19).
@@ -325,7 +354,8 @@ constexpr int kJak2Buckets[] = {
     kBlackoutList,
     kTexAnimList,   // T125: stays above every real bucket id, like the blackout
     kGlowList,      // T126
-    kDistortList};  // T127
+    kDistortList,   // T127
+    kCopyBackList};  // FIX 138
 constexpr int kJak1Count = sizeof(kJak1Buckets) / sizeof(kJak1Buckets[0]);
 constexpr int kJak2Count = sizeof(kJak2Buckets) / sizeof(kJak2Buckets[0]);
 // jak2 eye.gc: vu1-bucket-map with (merc-mode eye) puts a character's eye DMA in its level's
@@ -397,7 +427,8 @@ constexpr int kJak3Buckets[] = {
     kBlackoutList,
     kTexAnimList,  // T125 pattern: above every real bucket id, like the blackout
     kGlowList,    // T126
-    kDistortList};
+    kDistortList,
+    kCopyBackList};  // FIX 138: BlitDisplays do_copy_back / zoom-blur / slow-time
 constexpr int kJak3Count = sizeof(kJak3Buckets) / sizeof(kJak3Buckets[0]);
 // jak3 eye.gc: like jak2, the level NPC eye DMA rides the tex buckets, so every tex id
 // GL gives a TextureUploadHandler becomes a PrisTexEyes list here: 6/level x 10,
@@ -458,7 +489,9 @@ bool is_jak3_merc_bucket(int b) {
 constexpr int kJak3TieExtra = 6 * 10;   // master + 5 categories x 10 levels
 constexpr int kJak3MercExtra = 16 * 10;  // 16 merc/generic/tfrag-water rows per level
 constexpr int kJak3TableMax = kJak3Count + kJak3EyeTexCount + kJak3TieExtra + kJak3MercExtra;
-static_assert(kJak3TableMax == 321, "jak3-bucket-census.md section 3");
+// FIX 138: +1 for kCopyBackList (a dkgl side list, not a GOAL bucket -- census counts
+// the blackout/texanim/glow/distort side lists the same way).
+static_assert(kJak3TableMax == 322, "jak3-bucket-census.md section 3");
 constexpr int kMaxBuckets = kJak1Count > kJak2TableMax
                                ? (kJak1Count > kJak3TableMax ? kJak1Count : kJak3TableMax)
                                : (kJak2TableMax > kJak3TableMax ? kJak2TableMax : kJak3TableMax);
@@ -478,6 +511,17 @@ int list_index(int bucket) {
   return -1;
 }
 int s_cur_bucket = -1;
+// FIX 135 (AI-assisted): s_sky_menu_entry is set when the jak2 menu-entry frame capture
+// (fx-copy-buf: bucket 3's PC_PORT 0x10, blit-displays.gc's menu-mode branch) runs THIS
+// frame. Bucket 3 runs before the sky bucket, so the flag is readable when the half-res
+// decision is made; it forces the entry frame full-res even when coming from gameplay
+// (FIX 134's prev-draw detector is one frame late there and lets the 720->360->720
+// round-trip blur the frame the menu captures its frozen picture from). One-shot:
+// cleared in capture_begin. s_sky_menu_late counts frames where half-res DID run but the
+// sky bucket turned out menu-sized (drew <= kSkyMenuDrawMax) -- an exemption miss that
+// would blur the backdrop; pure diagnostic, logged as `late` in the dkgl stats line.
+bool s_sky_menu_entry = false;
+u64 s_sky_menu_late = 0;
 // §7.0 E HW debug (AI-assisted): per-bucket draw/index census. The tie category buckets
 // draw through the shared emitter like everything else; on the 98878af1 HW run bucket 266
 // (ETIE_W_L1_WATER) burned ~15.6 ms/frame of GPU while its plain-water twin 265 (same
@@ -645,6 +689,15 @@ ProgramShaders s_programs[] = {
     // T127: Sprite3 distorter (GL render_distorter, jak2 scattergun heat haze)
     {"sprite_distort", dkgl_sprite_distort_vert_dksh, dkgl_sprite_distort_vert_dksh_size,
      dkgl_sprite_distort_frag_dksh, dkgl_sprite_distort_frag_dksh_size, {}, {}, false},
+    // FIX 138 (AI-assisted): BlitDisplays' end-of-frame effects. simple_texture is
+    // FullScreenTexDraw (the zoom-blur old/new composite and the color filter);
+    // slow_time is SlowTimeEffect (the jak3 light-jak / gun slow-time overlay).
+    // Both draw with GL_INT index attribs, so their call sites run inside
+    // set_int_attrib_draws(true) like the TextureAnimator composite.
+    {"simple_texture", dkgl_simple_texture_vert_dksh, dkgl_simple_texture_vert_dksh_size,
+     dkgl_simple_texture_frag_dksh, dkgl_simple_texture_frag_dksh_size, {}, {}, false},
+    {"slow_time", dkgl_slow_time_vert_dksh, dkgl_slow_time_vert_dksh_size,
+     dkgl_slow_time_frag_dksh, dkgl_slow_time_frag_dksh_size, {}, {}, false},
 };
 
 // Vertex shaders whose y-scale differs per game: the jak2 build replaces the jak1 blob.
@@ -853,11 +906,18 @@ class SwitchEmitter final : public Emitter {
     // must replay from LAST frame's presented image -- without blit_prev it
     // copies the not-yet-drawn current frame target and the backdrop shows the
     // sepia tint only (the "yellow menu background" on jak3 HW, NRO 9e7a86a2).
-    seg.blit_prev =
+    const bool jak2_menu_capture =
         (s_bucket_ids == s_jak2_ids &&
-         s_bucket_ids[s_cur_bucket] == (int)jak2::BucketId::BUCKET_3) ||
+         s_bucket_ids[s_cur_bucket] == (int)jak2::BucketId::BUCKET_3);
+    seg.blit_prev =
+        jak2_menu_capture ||
         (s_bucket_ids == s_jak3_ids &&
          s_bucket_ids[s_cur_bucket] == (int)jak3::BucketId::BLIT_START);
+    if (jak2_menu_capture) {
+      // FIX 135: this is the fx-copy-buf menu-entry capture; the same frame's sky bucket
+      // must run full-res (see the s_sky_menu_entry comment near the top).
+      s_sky_menu_entry = true;
+    }
     s_lists[s_cur_bucket].segs.push_back(seg);
     open_segment(frame);
   }
@@ -874,6 +934,26 @@ class SwitchEmitter final : public Emitter {
     seg.blit = true;
     seg.blit_to_frame = true;
     seg.blit_dst_tex = dk_tex_id;  // the SOURCE image in this direction
+    seg.blit_src = src;
+    seg.blit_dst = dst;
+    seg.blit_linear = linear;
+    s_lists[s_cur_bucket].segs.push_back(seg);
+    open_segment(frame);
+  }
+  // FIX 136 (AI-assisted, J13 jak3 visuals): FBO -> FBO -- both images are dkgl offscreen
+  // targets, replayed as image -> image blits at record time. Same queue shape as the
+  // other blit directions.
+  void blit_tex_to_tex(u32 src_dk_tex_id, u32 dst_dk_tex_id, const DkImageRect& src,
+                       const DkImageRect& dst, bool linear) override {
+    if (!s_recording || s_cur_bucket < 0) {
+      return;
+    }
+    const bool frame = s_seg_frame;
+    close_segment();
+    Segment seg;
+    seg.blit = true;
+    seg.blit_src_tex = src_dk_tex_id;
+    seg.blit_dst_tex = dst_dk_tex_id;
     seg.blit_src = src;
     seg.blit_dst = dst;
     seg.blit_linear = linear;
@@ -1307,6 +1387,15 @@ bool s_distort_frame = false;  // distort_begin opened the list in this capture
 bool s_distort_armed = false;  // segment open: distort_dma may draw
 bool s_distort_on = true;      // A/B flag gk_dkgl_nodistort.txt
 u64 s_distort_draws = 0, s_distort_bad = 0;
+// FIX 138 (AI-assisted): the BlitDisplays end-of-frame effects (do_copy_back family).
+// s_copyback_on = gk_dkgl_copyback.txt on the SD (checked once, first capture); without it
+// the pendings are never consumed -- the exact pre-FIX-138 behavior, and the one-shot
+// probe logs (g_dkgl_copyprobe, set from BlitDisplays.cpp) still report what the game
+// issues. Counters: frames each effect actually replayed.
+bool s_copyback_on = false;
+u64 s_copyback_frames = 0, s_zoomblur_frames = 0, s_slowtime_frames = 0, s_colorfilt_frames = 0;
+// dkgl::g_dkgl_copyprobe is declared in BlitDisplays.h (the anonymous-namespace region
+// here cannot extern-declare it -- the first build attempt proved that the hard way).
 // GL objects (created on first use)
 u32 s_distort_fbo = 0, s_distort_tex = 0, s_distort_vao = 0, s_distort_vbo = 0, s_distort_ibo = 0;
 int s_distort_fbo_w = 0, s_distort_fbo_h = 0;
@@ -1394,6 +1483,9 @@ u32 s_sky_fbo = 0, s_sky_tex = 0;   // GL objects, created on first use (distort
 int s_sky_w = 0, s_sky_h = 0;       // current half-res target size
 int s_sky_fullres = -1;             // gk_dkgl_fullsky.txt: 1 = keep the full-res path
 u64 s_sky_halfres_frames = 0, s_sky_halfres_fail = 0, s_sky_halfres_nodraw = 0;
+u64 s_sky_menu_frames = 0;         // FIX 134: sky-bucket frames kept full-res (menu backdrop)
+constexpr u64 kSkyMenuDrawMax = 8;  // menu mode = 3 backdrop quads; in-game sky = 20+
+u64 s_sky_prev_draws = ~0ull;      // last SKY_DRAW bucket draw count (menu detector)
 
 void sky_make_objects() {
   gen_framebuffers(1, &s_sky_fbo);
@@ -1487,7 +1579,28 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   // the frame target is FBO 0 at every bucket boundary. (The §7.2 half-res sky bucket skips
   // this prologue: sky_halfres_begin binds the half-res FBO instead, below open_segment.)
   const bool sky_wants = sky_halfres_wants(bucket);
-  if (!sky_wants) {
+  // FIX 134 (AI-assisted): jak2's pause/save menu draws its frozen-frame
+  // backdrop (the bucket-3 capture, tbp #x4c0) through the SKY_DRAW bucket
+  // itself -- sky-tng's menu-mode branch (sky-tng.gc ~line 869) is 3
+  // full-screen quads, so the zero-draw guard can never protect it (nodraw
+  // 1 across the whole 2026-11-18 session) and the 720 -> 360 -> 720
+  // round-trip blurs the whole menu picture. Menu mode is told apart from
+  // the in-game sky (20+ draws) by the PREVIOUS sky bucket's draw count,
+  // since the half-res decision must be made before the renderer runs.
+  // The title-screen backdrop takes the same path and is fixed with it.
+  // FIX 135 (AI-assisted): the prev-draw detector is one frame late at menu
+  // ENTRY from gameplay (prev = 20+), so the entry frame rode at half-res and
+  // the frame the menu captures its frozen picture from was the blurred one
+  // (the "invisible behind the fade-in" claim was wrong: the capture side
+  // bakes it). s_sky_menu_entry -- set by this frame's bucket-3 fx-copy-buf
+  // capture, which runs before the sky bucket -- plugs that hole: the entry
+  // frame runs full-res too.
+  const bool sky_menu =
+      sky_wants && (s_sky_prev_draws <= kSkyMenuDrawMax || s_sky_menu_entry);
+  if (sky_menu) {
+    s_sky_menu_frames++;
+  }
+  if (!sky_wants || sky_menu) {
     viewport(0, 0, s_fb_w, s_fb_h);
     if (bound_framebuffer() != 0) {
       bind_framebuffer(0);
@@ -1507,7 +1620,7 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   // §7.2 half-res sky: bind the half-res FBO + queue the frame snapshot blit (after
   // open_segment, so blit_frame_to_tex has a segment to close). On failure fall back to
   // the normal full-res prologue.
-  bool sky_halfres = sky_wants;
+  bool sky_halfres = sky_wants && !sky_menu;
   if (sky_halfres && !sky_halfres_begin()) {
     sky_halfres = false;
     viewport(0, 0, s_fb_w, s_fb_h);
@@ -1527,6 +1640,19 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   }
   // §7.2 half-res sky: back to the frame target + queue the composite blit (replayed after
   // this bucket's draw list, before the next segment). A zero-draw bucket is a GL no-op.
+  if (sky_wants) {
+    s_sky_prev_draws = draw_count() - draws_before;  // FIX 134 menu-mode stamp
+    if (sky_halfres && s_sky_prev_draws <= kSkyMenuDrawMax) {
+      // FIX 135 evidence: this frame's sky turned out menu-sized while half-res ran (the
+      // prev-draw detector missed it -- e.g. a menu screen whose own sky draws exceed the
+      // threshold, or the menu quads landing a frame after the capture). The composite
+      // already queued, so this frame's backdrop is blurred; count it so the HW log can
+      // tell the save-menu case apart. If `late` climbs while the picture is broken, the
+      // exemption needs the retro-detect skip; if it stays 0 the display is fine and any
+      // remaining blur is baked on the capture side.
+      s_sky_menu_late++;
+    }
+  }
   if (sky_halfres) {
     sky_halfres_end(draw_count() != draws_before);
   }
@@ -1534,6 +1660,31 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   // into the next bucket or the texture animator; it overrides their texture wrap/filter
   // (cloud noise lost GL_REPEAT -> hard-edged sky quads).
   background_sampler_unbind();
+  // FIX 138 (AI-assisted): GL dispatch_buckets runs BlitDisplays::apply_color_filter right
+  // after the TEX_HUD_HUD_ALPHA bucket's renderer (OpenGLRenderer.cpp:1994) -- the 0x14
+  // color filter (jak3 desaturation tints). Same position here, still inside this bucket's
+  // open segment and before restore_bucket_end_state, so the recorded state is exactly the
+  // state GL inherits. Gated on gk_dkgl_copyback.txt (the s_copyback_on one-shot check
+  // happens in capture_begin, which always runs before this).
+  if (s_copyback_on && s_blit && s_bucket_ids == s_jak3_ids &&
+      bucket == (int)jak3::BucketId::TEX_HUD_HUD_ALPHA) {
+    const BlitPendingInfo pi = s_blit->pending_effects();
+    if (pi.color_filter) {
+      static bool s_logged_cf = false;  // one-shot probe log (params for the HW readout)
+      if (!s_logged_cf) {
+        s_logged_cf = true;
+        switch_run_logf("[dkgl] copyprobe: color_filter rgba %.2f %.2f %.2f %.2f",
+                        pi.color_filter_rgba.x(), pi.color_filter_rgba.y(),
+                        pi.color_filter_rgba.z(), pi.color_filter_rgba.w());
+      }
+      s_colorfilt_frames++;
+      ProfilerNode node("color-filter");
+      ScopedProfilerNode cfprof(&node);
+      set_int_attrib_draws(true);  // FullScreenTexDraw draws with a GL_INT index attrib
+      s_blit->apply_color_filter(s_srs.get(), cfprof);
+      set_int_attrib_draws(false);
+    }
+  }
   s_lists[list_idx].draws = draw_count() - draws_before;
   s_win_draws[list_idx] += s_lists[list_idx].draws;  // Row I: per-window draw profile
   restore_bucket_end_state();  // T113: no colour mask / stencil leaks into native passes
@@ -1879,6 +2030,17 @@ bool init_jak3_foreground(TexturePool* pool, int loaded) {
     }
   }
   switch_run_logf("[dkgl] jak3 eyes: %d tex-bucket eye lists", eye_lists);
+  // #J12 / #19 (AI-assisted): the eye probe is not jak1-only -- jak3's eye lists are
+  // spread over the tex buckets, so record_frame_fence runs the copies after the last
+  // list of the frame. The map probe reads the ProgressRenderer off-screen minimap.
+  s_eyeprobe_on = flag("gk_dkgl_eyeprobe.txt");
+  if (s_eyeprobe_on) {
+    switch_run_logf("[dkgl] eye probe on (gk_dkgl_eyeprobe.txt)");
+  }
+  s_mapprobe_on = flag("gk_dkgl_mapprobe.txt");
+  if (s_mapprobe_on) {
+    switch_run_logf("[dkgl] map probe on (gk_dkgl_mapprobe.txt)");
+  }
   int mercs = 0, generics = 0;
   auto add_generic = [&](int bucket, const char* pattern, int level, Generic2::Mode mode) {
     const int i = list_index(bucket);
@@ -2597,6 +2759,19 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
   if (!s_active) {
     return false;
   }
+  // FIX 138 (AI-assisted): one-time A/B flag check. gk_dkgl_copyback.txt enables the
+  // BlitDisplays end-of-frame effects (do_copy_back / apply_color_filter, captured into
+  // kCopyBackList / the HUD tex bucket). Absent = the pendings are never consumed, the
+  // exact pre-FIX-138 behavior. The probe global also arms BlitDisplays' one-shot usage
+  // logs, which work either way (bucket 3 runs through dkgl in all cases).
+  static bool s_copyback_checked = false;
+  if (!s_copyback_checked) {
+    s_copyback_checked = true;
+    s_copyback_on = flag("gk_dkgl_copyback.txt");
+    g_dkgl_copyprobe = true;
+    switch_run_logf("[dkgl] copyback %s (gk_dkgl_copyback.txt)",
+                    s_copyback_on ? "ON" : "off");
+  }
   // Like OpenGLRenderer's per-frame m_render_state.frame_idx++ (AI-assisted). Tie3's
   // render_from_another only draws when its master ran THIS frame; with frame_idx stuck,
   // the TRANS/WATER category buckets drew with a master's stale level pointers after the
@@ -2669,6 +2844,7 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
   s_srs->render_fb_h = s_fb_h;
 
   s_recording = true;
+  s_sky_menu_entry = false;  // FIX 135: one-shot per frame (set by bucket 3, read by sky)
   frame_begin();
   s_cap_open = true;
   s_cap_chain = chain_data;
@@ -3138,12 +3314,96 @@ int capture_cpu_top(int* bucket, double* ms, int max) {
   return n;
 }
 
+// FIX 138 (AI-assisted): BlitDisplays::do_copy_back at its GL position. GL runs it from
+// OpenGLRenderer::render (blit_display, line ~1466) after EVERY bucket and before
+// do_pcrtc_effects; dkgl captures it here, at capture_end (all buckets walked), into the
+// kCopyBackList. It consumes the 0x11 copy-back / 0x13 zoom-blur / 0x15 slow-time pendings
+// BlitDisplays::render armed at bucket 3; with none armed the list stays empty (no segment,
+// zero cost). The blits replay through the existing emitters: blur_old/blur_new captures
+// are frame -> FBO (blit_frame_to_tex, HW-proven by the menu backdrop), the 0x11 restore is
+// FBO -> frame (FIX 136's blit_tex_to_frame, same emitter as the half-res sky composite),
+// and the compositing draws are plain DrawCmds (simple_texture / slow_time, FIX 138 table).
+// GL_INT index attribs: allow-listed around the call like the TextureAnimator composite.
+// The clear inside do_zoom_blur/do_slow_time goes through the normal dkgl clear path.
+void run_copy_back() {
+  if (!s_copyback_on || !s_blit) {
+    return;
+  }
+  const int idx = list_index(kCopyBackList);
+  if (idx < 0) {
+    return;
+  }
+  const BlitPendingInfo pi = s_blit->pending_effects();
+  if (!pi.copy_back && !pi.zoom_blur && !pi.slow_time) {
+    // nothing armed: GL's do_copy_back no-ops the same way. Drop any stale segment so
+    // record_copy_back cannot replay last frame's effects again.
+    s_lists[idx].segs.clear();
+    s_lists[idx].valid = false;
+    return;
+  }
+  static bool s_logged_cb = false, s_logged_zb = false, s_logged_st = false;
+  if (pi.copy_back && !s_logged_cb) {
+    s_logged_cb = true;
+    switch_run_logf("[dkgl] copyprobe: copy_back (PC-BLIT restore over the frame)");
+  }
+  if (pi.zoom_blur && !s_logged_zb) {
+    s_logged_zb = true;
+    switch_run_logf(
+        "[dkgl] copyprobe: zoom_blur texels %d pos %.1f,%.1f alpha %.3f is2d %u "
+        "color %d,%d,%d,%d",
+        (int)pi.zoom_blur_params.texels, pi.zoom_blur_params.pos.x(),
+        pi.zoom_blur_params.pos.y(), pi.zoom_blur_params.alpha_current,
+        pi.zoom_blur_params.is_2d, (int)pi.zoom_blur_params.color.x(),
+        (int)pi.zoom_blur_params.color.y(), (int)pi.zoom_blur_params.color.z(),
+        (int)pi.zoom_blur_params.color.w());
+  }
+  if (pi.slow_time && !s_logged_st) {
+    s_logged_st = true;
+    switch_run_logf("[dkgl] copyprobe: slow_time amount %.3f", pi.slow_time_amount);
+  }
+  if (pi.copy_back) {
+    s_copyback_frames++;
+  }
+  if (pi.zoom_blur) {
+    s_zoomblur_frames++;
+  }
+  if (pi.slow_time) {
+    s_slowtime_frames++;
+  }
+  s_lists[idx].segs.clear();
+  s_lists[idx].valid = false;
+  s_cur_bucket = idx;
+  begin_bucket();
+  s_emitter.bucket_start();
+  // same prologue as run_bucket / tex_anim_begin: GL default viewport + the frame target
+  // (do_copy_back's state inheritance is then exactly GL's end-of-buckets shadow state).
+  viewport(0, 0, s_fb_w, s_fb_h);
+  if (bound_framebuffer() != 0) {
+    bind_framebuffer(0);
+  }
+  pending_target_consumed();
+  s_color_mask = DkColorMask_RGBA;
+  open_segment(true);
+  {
+    ProfilerNode node("copyback");
+    ScopedProfilerNode prof(&node);
+    set_int_attrib_draws(true);  // FullScreenTexDraw / SlowTimeEffect GL_INT index attribs
+    s_blit->do_copy_back(s_srs.get(), prof);
+    set_int_attrib_draws(false);
+  }
+  restore_bucket_end_state();
+  close_segment();
+  s_lists[idx].valid = true;
+  s_cur_bucket = -1;
+}
+
 void capture_end() {
   if (!s_cap_open) {
     return;
   }
   capture_until(kBlackoutList);  // whatever the replay did not reach
   s_cap_open = false;
+  run_copy_back();  // FIX 138: GL blit_display/do_copy_back order -- before the fade
   run_blackout(s_pmode_alp.load(std::memory_order_relaxed));
   frame_end();
   s_recording = false;
@@ -3160,7 +3420,8 @@ void capture_end() {
         "[dkgl] ocean %llu frames | segs %u+%u | data %u/%u KB ubo %u/%u KB high | fails "
         "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
-        "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu nodraw %llu",
+        "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu nodraw %llu menu %llu"
+        " late %llu | revblit %llu | copyback %llu zoomblur %llu slowtime %llu colorfilt %llu",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
         (unsigned)s_lists[std::max(
              0,
@@ -3182,7 +3443,11 @@ void capture_end() {
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
         (unsigned long long)s_glow_bad, (unsigned long long)s_distort_draws,
         (unsigned long long)s_distort_bad, (unsigned long long)s_sky_halfres_frames,
-        (unsigned long long)s_sky_halfres_fail, (unsigned long long)s_sky_halfres_nodraw);
+        (unsigned long long)s_sky_halfres_fail, (unsigned long long)s_sky_halfres_nodraw,
+        (unsigned long long)s_sky_menu_frames, (unsigned long long)s_sky_menu_late,
+        (unsigned long long)rev_blit_count(),  // FIX 136: A/B engagement readout
+        (unsigned long long)s_copyback_frames, (unsigned long long)s_zoomblur_frames,
+        (unsigned long long)s_slowtime_frames, (unsigned long long)s_colorfilt_frames);
     // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
     // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
     // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData
@@ -3363,6 +3628,28 @@ int eye_src_probe_take() {
   return s_src_probe_budget-- > 0;
 }
 
+// #J12 (AI-assisted): budgeted one-shot logs for the counters jak3 moved off zero.
+// The flags are read lazily on first use (render-thread one-time access()).
+int notex_probe_take() {
+  static int s_budget = -1;  // -1 = unchecked, 0 = exhausted/off
+  if (s_budget < 0) {
+    s_budget = flag("gk_dkgl_notexprobe.txt") ? 24 : 0;
+  }
+  return s_budget > 0 ? (s_budget--, 1) : 0;
+}
+
+int blit_probe_take() {
+  static int s_budget = -1;
+  if (s_budget < 0) {
+    s_budget = flag("gk_dkgl_blitprobe.txt") ? 24 : 0;
+  }
+  return s_budget > 0 ? (s_budget--, 1) : 0;
+}
+
+int cur_bucket_id() {
+  return (s_cur_bucket >= 0 && s_cur_bucket < s_bucket_count) ? s_bucket_ids[s_cur_bucket] : -1;
+}
+
 bool record_bucket(int bucket) {
   if (!s_active) {
     return false;
@@ -3370,7 +3657,12 @@ bool record_bucket(int bucket) {
   // T126: the tex-anim / glow / distort side lists are in the table (list_index) but only
   // play at their own slot (record_tex_anim / record_glow / record_distort); the world loop's
   // call must skip them, or the additive glow would draw twice.
-  if ((bucket == kTexAnimList || bucket == kGlowList || bucket == kDistortList) &&
+  // FIX 138 (AI-assisted): same rule for kCopyBackList (record_copy_back replays it) and
+  // kBlackoutList -- the gen2 world loop walks the whole table, so without this guard a
+  // fading frame replayed the fade quad TWICE (loop position + record_blackout at the
+  // end; the second pass made mid-fades darker than GL ever drew them).
+  if ((bucket == kTexAnimList || bucket == kGlowList || bucket == kDistortList ||
+       bucket == kCopyBackList || bucket == kBlackoutList) &&
       !s_side_list_call) {
     return false;
   }
@@ -3413,6 +3705,20 @@ bool record_bucket(int bucket) {
             DkImageView src;
             dkImageViewDefaults(&src, img);
             dkdev::blit_to_frame(&src, &seg.blit_src, &seg.blit_dst, flags);
+          } else if (seg.blit_src_tex != 0) {
+            // FIX 136 (AI-assisted, J13): image -> image (glBlitFramebuffer with BOTH
+            // fbos nonzero, e.g. the jak3 minimap re-publish). Full barrier before (the
+            // source was written by 3D draws) and image-invalidate after, so the first
+            // draw sampling the destination gets fresh texels (pitfall P3).
+            const DkImage* simg = (const DkImage*)dktexgpu::image_of(seg.blit_src_tex);
+            if (simg) {
+              DkImageView src, dst;
+              dkImageViewDefaults(&src, simg);
+              dkImageViewDefaults(&dst, img);
+              dkCmdBufBarrier(cb, DkBarrier_Full, 0);
+              dkCmdBufBlitImage(cb, &src, &seg.blit_src, &dst, &seg.blit_dst, flags, 0);
+              dkCmdBufBarrier(cb, DkBarrier_Full, DkInvalidateFlags_Image);
+            }
           } else {
             DkImageView dst;
             dkImageViewDefaults(&dst, img);
@@ -3457,8 +3763,95 @@ bool record_bucket(int bucket) {
   return true;
 }
 
+// #J12: see the s_mapprobe_* comment at the top. Runs from record_frame_fence, after
+// the frame's dkgl lists were called, so the copy reads the final minimap content.
+void map_probe(DkCmdBuf cb) {
+  constexpr u32 kPx = 128 * 128;  // one ProgressRenderer off-screen map target
+  if (!s_mapprobe_on || s_mapprobe_rounds >= 5) {
+    return;
+  }
+  if (s_mapprobe_armed) {
+    if (s_captures <= s_mapprobe_at + 1) {
+      return;  // two presents have not passed: the copy may still be in flight (P2)
+    }
+    s_mapprobe_armed = false;
+    if (dkFenceWait(&s_mapprobe_fence, 100'000'000) != DkResult_Success) {
+      switch_run_logf("[dkgl] map probe #%u: fence wait failed", (unsigned)s_mapprobe_rounds + 1);
+      return;
+    }
+    const u8* px = s_mapprobe_buf.cpu;
+    u32 dark = 0;
+    u64 ar = 0, ag = 0, ab = 0, aa = 0;
+    for (u32 p = 0; p < kPx; p++) {
+      if (px[p * 4] + px[p * 4 + 1] + px[p * 4 + 2] < 12) {
+        dark++;
+      }
+      ar += px[p * 4];
+      ag += px[p * 4 + 1];
+      ab += px[p * 4 + 2];
+      aa += px[p * 4 + 3];
+    }
+    switch_run_logf("[dkgl] map probe #%u: %s | dark %u/%u | avg rgba %u,%u,%u,%u",
+                    (unsigned)s_mapprobe_rounds + 1,
+                    dark == kPx       ? "EMPTY"
+                    : dark > kPx - kPx / 8 ? "partial"
+                                         : "content",
+                    dark, kPx, (unsigned)(ar / kPx), (unsigned)(ag / kPx), (unsigned)(ab / kPx),
+                    (unsigned)(aa / kPx));
+    s_mapprobe_rounds++;
+    return;
+  }
+  if (s_captures < 300 || s_captures < s_mapprobe_last + 300) {
+    return;  // first probe ~5 s in, then every ~5 s, five rounds
+  }
+  if (!s_hud_progress_a) {
+    switch_run_logf("[dkgl] map probe: no hud renderer -- disabling");
+    s_mapprobe_on = false;
+    return;
+  }
+  if (!s_mapprobe_buf.ok()) {
+    s_mapprobe_buf = dkdev::buffer_pool()->acquire(kPx * 4);
+    if (!s_mapprobe_buf.ok()) {
+      switch_run_logf("[dkgl] map probe: buffer acquire failed -- disabling");
+      s_mapprobe_on = false;
+      return;
+    }
+  }
+  // "no dk image" is itself the diagnostic: the off-screen FBO never materialized a
+  // dk texture, so the captured off-screen draws have nowhere to land.
+  const u64 gl_tex = s_hud_progress_a->minimap_fb_gl_tex();
+  const u64 id = resolve_texture_id(gl_tex);
+  const DkImage* img = id ? (const DkImage*)dktexgpu::image_of((u32)id) : nullptr;
+  if (!img) {
+    switch_run_logf(
+        "[dkgl] map probe: no dk image for the minimap FBO (gl %u, dk %llu) -- disabling",
+        (unsigned)gl_tex, (unsigned long long)id);
+    s_mapprobe_on = false;
+    return;
+  }
+  DkImageView view;
+  dkImageViewDefaults(&view, img);
+  const DkImageRect rc{0, 0, 0, 128, 128, 1};
+  const DkCopyBuf cbuf{s_mapprobe_buf.gpu, 0, 0};
+  dkCmdBufCopyImageToBuffer(cb, &view, &rc, &cbuf, 0);
+  dkCmdBufSignalFence(cb, &s_mapprobe_fence, false);
+  s_mapprobe_armed = true;
+  s_mapprobe_at = s_captures;
+  s_mapprobe_last = s_captures;
+  switch_run_logf("[dkgl] map probe #%u armed", (unsigned)s_mapprobe_rounds + 1);
+}
+
 bool record_blackout() {
-  return record_bucket(kBlackoutList);
+  // FIX 138: side-list call (was a bare record_bucket) -- the record_bucket guard skips
+  // kBlackoutList from the world loop's table walk, so this is the ONLY replay site.
+  return record_side_list(kBlackoutList);
+}
+
+// FIX 138 (AI-assisted): replay the captured BlitDisplays end-of-frame effects. The world
+// recorder calls this after its LAST bucket and before record_blackout -- GL order
+// (OpenGLRenderer::render: blit_display/do_copy_back, then do_pcrtc_effects).
+bool record_copy_back() {
+  return record_side_list(kCopyBackList);
 }
 
 // J7 (AI-assisted): the frame's single slot-fence signal, replacing the per-bucket one
@@ -3472,6 +3865,13 @@ void record_frame_fence() {
     return;
   }
   s_frame_lists_called = false;
+  // #J12 (AI-assisted): end-of-frame probes. The jak3 eye lists are spread over the
+  // tex buckets (and the minimap FBO is written mid-frame), so copy them here, after
+  // the last list of the frame ran. Both functions no-op unless their flag is set.
+  if (g_game_version == GameVersion::Jak3) {
+    eye_probe(dkdev::cmd_handle());
+    map_probe(dkdev::cmd_handle());
+  }
   dkCmdBufSignalFence(dkdev::cmd_handle(), &s_fence[s_slot], false);
   s_fence_armed[s_slot] = true;
 }
@@ -3533,6 +3933,9 @@ bool record_distort() {
   return false;
 }
 bool record_blackout() {
+  return false;
+}
+bool record_copy_back() {
   return false;
 }
 void record_frame_fence() {}

@@ -16,6 +16,9 @@ class ProgressRenderer : public DirectRenderer {
   static constexpr int kMinimapFbp = 126;
   ProgressRenderer(const std::string& name, int my_id, int batch_size);
   void init_textures(TexturePool& texture_pool, GameVersion) override;
+  // #J12 (AI-assisted): the dkgl minimap probe reads the off-screen map target
+  // (fbp 126 / VRAM 4032) to check the jak3 off-screen capture end to end.
+  GLuint minimap_fb_gl_tex() const { return m_minimap_fb.texture(); }
   void handle_frame(u64 val, SharedRenderState* render_state, ScopedProfilerNode& prof) override;
   void pre_render() override;
   void post_render() override;

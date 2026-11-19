@@ -20,12 +20,24 @@ constexpr u32 kMaxAttribs = 8;     // GL fixes locations 0..7 for the ocean attr
 // extra glGenFramebuffers returned 0 = the frame target and the mip passes drew a square in
 // the bottom-left corner of the screen. Running out is logged once (dkgl_state.cpp).
 // TODO #5: Merc2 adds a bone buffer + one buffer/VAO pair per blerc (MOD_VTX) draw
-constexpr u32 kMaxBuffers = 512;
-constexpr u32 kMaxVaos = 128;
+// FIX 137 (AI-assisted, J14): raised with kMaxTextures -- jak3 registers 321 buckets
+// (vs jak2's ~300) and every renderer that draws owns a VAO + one or two VBOs.
+constexpr u32 kMaxBuffers = 1024;
+constexpr u32 kMaxVaos = 256;
 // #19 (AI-assisted): the GL EyeRenderer alone needs 40 textures + 40 FBOs (20 eye pairs);
 // at 64 the table ran out and the late eyes got id 0 = black eyes on every character.
-constexpr u32 kMaxTextures = 256;  // dkgl-created (glGenTextures) objects
-constexpr u32 kMaxFbos = 256;
+// FIX 137 (AI-assisted, J14): the 2026-11-19 jak3 probe run proved 256 was too small:
+// TextureAnimator's OpenGLTexturePool preallocates 334 GL textures at init and keeps
+// every one live (jak2's size list is identical), so the table overflowed mid-init and
+// every glGenTextures after it returned 0. The four probes all named the fallout: the
+// minimap FBO reported gl 0, the BlitDisplays copiers' attached tex was 0 (the whole
+// "blit bad ~1.8/frame" family), all 40 eye GPU textures were 0 ("no image for any
+// slot"), and the texanim composite targets were 0 (notex, bucket 1001). 1024 covers
+// the pool + every renderer + runtime churn for all three games.
+constexpr u32 kMaxTextures = 1024;  // dkgl-created (glGenTextures) objects
+// FIX 137 (AI-assisted, J14): every texanim GPU-texture VRAM entry owns an FBO
+// (FramebufferTexturePair ctor), and the jak3 title screen alone reaches FBO id 166.
+constexpr u32 kMaxFbos = 512;
 // = DK_NUM_TEXTURE_BINDINGS: DirectRenderer (far ocean) samples on GL_TEXTURE20 (tex_T20)
 constexpr u32 kMaxTexUnits = 32;
 constexpr u32 kTexIdBase = 0x4000'0000u;  // dkgl-created GL texture ids start here
@@ -75,6 +87,13 @@ struct Emitter {
   virtual void blit_tex_to_frame(u32 dk_tex_id, const DkImageRect& src, const DkImageRect& dst,
                                  bool linear) {
     (void)dk_tex_id, (void)src, (void)dst, (void)linear;
+  }
+  // FIX 136 (AI-assisted, J13 jak3 visuals): the third direction -- one dkgl offscreen
+  // image blitted into ANOTHER dkgl offscreen image (glBlitFramebuffer read-FBO -> draw-FBO,
+  // both nonzero). A/B flag gk_dkgl_revblit.txt; the host mock ignores it.
+  virtual void blit_tex_to_tex(u32 src_dk_tex_id, u32 dst_dk_tex_id, const DkImageRect& src,
+                              const DkImageRect& dst, bool linear) {
+    (void)src_dk_tex_id, (void)dst_dk_tex_id, (void)src, (void)dst, (void)linear;
   }
   // T129a (AI-assisted): glGenerateMipmap on a dkgl texture (TextureAnimator) -- queue
   // level L-1 -> L downsample blits inside the same DkImage. w/h = the level-0 rect,
@@ -206,6 +225,10 @@ void color_mask(bool r, bool g, bool b, bool a);
 void get_integerv(u32 pname, int* out);
 // dkgl review: one stderr line the first time an object table is full (gen_* returned 0)
 void note_table_full(const char* what);
+// FIX 137 (AI-assisted): live counts so note_table_full can print all four tables'
+// occupancy when any one of them overflows (it fires once per table per process).
+u32 live_tex_count();
+u32 live_fbo_count();
 // buffers / VAO
 void gen_buffers(int n, u32* out);
 void delete_buffers(int n, const u32* in);
@@ -262,6 +285,9 @@ void bind_framebuffer_target(u32 target, u32 name);
 bool blit_framebuffer(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int dx1, int dy1,
                       u32 mask, u32 filter);
 u64 unsupported_blit_count();
+// FIX 136 (AI-assisted, J13): blits replayed through the new read-FBO -> frame /
+// read-FBO -> draw-FBO directions (A/B flag gk_dkgl_revblit.txt).
+u64 rev_blit_count();
 bool framebuffer_texture_2d(u32 target, u32 attachment, u32 tex_name, int level);
 // T126 (AI-assisted): renderbuffers (GlowRenderer's depth24_stencil8 grid depth) live in the
 // texture table as depth-only render targets; they are never sampled.
@@ -375,6 +401,12 @@ void restore_bucket_end_state();
 u64 inert_draw_count();             // draws skipped because the program is not in the table
 u64 skipped_draw_count();           // dkgl review: draws dropped (unknown attrib format, no IBO...)
 u64 no_texture_draw_count();        // §7.2 phase 2: draws with every sampler unbound (stale bind)
+// #J12 (AI-assisted): budgeted probe hooks for the stats that jak3 moved off zero.
+// Defined in dkgl_frame.cpp's Switch section; the call sites are __SWITCH__-guarded
+// so host builds never reference them.
+int notex_probe_take();  // gk_dkgl_notexprobe.txt: log zero-sampler draws (bucket)
+int blit_probe_take();   // gk_dkgl_blitprobe.txt: log unsupported framebuffer blits
+int cur_bucket_id();     // s_cur_bucket's bucket id, -1 outside a capture
 u64 bad_attrib_draw_count();        // skipped subset -- attrib format/dead buffer/none
 u64 missing_element_draw_count();   // skipped subset -- element buffer dead/empty
 u64 bad_ubo_draw_count();           // skipped subset -- uniform range dead/unaligned

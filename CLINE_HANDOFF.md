@@ -2539,3 +2539,367 @@ HW test order (one sitting): jak3 weather cheats + J9 aspect + intro
 white-box watch; jak2 weather + FIX 131 black-walls (watch gk_run_log for
 FIX131 slot-guard-hold lines + the new probe pages); jak1 debug-cheat
 persistence (FIX 129-jak1).
+
+---
+## Handoff — FIX 132 probe retire, jak2 perf restored (2026-11-18, AI-assisted)
+
+**User report:** "performances are abysmal" on the card's jak2 build. Verified from the
+card's own logs: NOT the half-res sky — `sky halfres 60/660/1260 fail 0`, `gpu top`
+b5 1.13-2.83 ms (was 5.8-8.7), most 10-s windows `0 over 16.7`. The cost was the
+FIX 123/131 `tex_probe_page` diagnostic list: hot pages (1021 851k lines, 853 599k,
+2929 414k of 2.06M total) logged `[pool] link` from the render thread → 91 MB
+`gk_run_log.txt` on the card, ~11k snprintf+mutex+SD-flush per second.
+
+**Fix (FIX 132):** `tex_probe_page` now returns false — probe retired. The black-wall
+root cause it investigated is already fixed by the committed FIX 131 slot-guard
+(commit `d533b50bd`); the diagnostic evidence is archived:
+`hw-logs/jak2-probe-flood-20261118/gk_run_log.txt.gz` (91 MB → 7.7 MB). Kept: half-res
+sky + zero-draw guard, FIX 131 slot-guard semantics, FIX 130, J9 — all validated or
+behaviour-neutral on this HW log. NOTE: the deployed `1cd2c518` predates the zero-draw
+guard's `nodraw` counter (its stats line has no `nodraw`); the new NRO has it.
+
+**Built + deployed:** `check-switch.sh jak2` PASS (EL0 clean), dk-lint PASS.
+New NRO `5ecad3108c78e798926819b71a8b960e`, copied to the card with rotation
+(`1cd2c518` → `jak2.nro.bak-1cd2c518`), md5-verified on-card, `._*` sidecars purged,
+91 MB `gk_run_log.txt` truncated after archiving (fresh log starts with the new NRO).
+Docs: DKGL_TODO §7.2 sky entry now records the HW PASS + FIX 132 rule
+("never leave hot pages in the probe list in a deploy build").
+
+**Uncommitted (this session):** TexturePool.cpp probe retire + doc updates — left for
+the user to commit. GAME.CGO/TSZ on the card unchanged (`104e34cc`/`9be8c134`).
+
+**HW check next boot:** framerate back to the 60 fps the sky fix bought; log stays
+KB-sized; `sky halfres N fail 0 nodraw K` (nodraw > 0 in menus is expected).
+If black walls ever return, re-add ONE page to `tex_probe_page` temporarily —
+never hot pages (1021/853/2929/2405/1325/998), and never in a deploy build.
+
+---
+
+## Handoff — FIX 133 + FIX 134: the two REPORTED regressions were still live (2026-11-18, AI-assisted)
+
+**User report (original task):** save-menu picture degraded again, black walls still
+appear mid-run — on the FIX 131 build. The FIX 132 probe revert fixed the framerate
+the probe itself caused, but neither reported regression: the archived probe-flood log
+proves both.
+
+**FIX 133 — black walls (pressure fallback false positive):** the log shows
+`FIX125 pressure` at t=166 s (lwidea level stream), then a mass `[pool] unload 853/*`
+at t=168.9 s, with NO re-give ever following (last give of 853 was t=22.4 s) — while
+`[dk] tex ... fail=0` the WHOLE session: the texture store never failed. The trigger was
+`loader_under_pressure()` = the GEOMETRY staging buffer pool dipping < 16 MB (routine
+during any level stream), which the old wiring let drop the FIX 131 slot guard to 3600
+frames → draw-idle-but-still-linked page 853 (ruins) was unloaded → black walls on
+return. `Loader::update` now splits the signals: the slot guard yields ONLY when the
+texture heap itself is failing (`dktexgpu::failed_allocs()` is MONOTONIC — compare vs
+the last-seen count, not vs 0; a chronically-full store keeps failing retries and stays
+pressured, a one-off failure yields one update). Buffer-pool pressure keeps governing
+only the FIX 125 draw-stamp defer window (120 frames), which cannot blacken a linked
+page. NOTE the old code also had a latent latch bug: `failed_allocs() > 0` is
+"has EVER failed" — one failure would have kept the guard at 3600 forever; the delta
+form fixes that too. **Diagnostics restored safely (probe stays retired):** `[pool]
+give/unload/placeholder-new/FIX124-done` now log UNCONDITIONALLY — they are rare,
+event-driven lines bounded by level streams; only the per-frame `[pool] link` lines
+(which made the 91 MB flood) stay behind the retired `tex_probe_page`. So give/unload
+pairs are auditable on the next HW run without re-arming any hot page.
+
+**FIX 134 — save-menu picture (and title backdrop):** root cause was NOT the bucket-3
+capture (`blit bad 0` — capture healthy) and the zero-draw guard is STRUCTURALLY unable
+to protect it: in menu mode `sky-tng.gc` (line ~869) draws the frozen-frame backdrop
+(tbp `#x4c0`) + tint + filter overlay INSIDE the sky-draw bucket — 3 full-screen quads,
+so the bucket always "drew" (`nodraw 1` all session) and the half-res sky round-tripped
+the picture 720→360→720 (linear blur). The half-res path now stays off when the PREVIOUS
+sky-bucket draw count ≤ 8 (menu ≈ 3 draws, in-game sky = 20+; the decision must precede
+the renderer run, so one menu-entry frame rides at half-res behind the progress-interp
+fade-in — invisible; the title-screen backdrop takes the same path and is fixed with
+it). dkgl stats line gained `menu K`: `sky halfres N fail M nodraw K menu L`.
+
+**Built + deployed (NRO-only; GAME.CGO `104e34cc` / TSZ.DGO `9be8c134` untouched — no
+GOAL changes):** incremental docker build 8/8 clean, `check-switch.sh jak2` PASS (EL0
+audit clean), dk-lint PASS. NRO `ea61ea4b9cb6dfc19a9ca29cf25539a3` on the card,
+md5-verified ON-card post-copy, old `5ecad310` rotated to `jak2.nro.bak-5ecad310`,
+`._*` sidecars purged.
+
+**Uncommitted (on top of the FIX 132 session's uncommitted set — now 5 files):**
+Loader.cpp (FIX 133 pressure split), TexturePool.cpp (probe retire + unconditional
+rare-event logging), dkgl_frame.cpp (FIX 134 menu exemption + `menu` stat),
+DKGL_TODO.md (§7.2 FIX 133/134 entries), CLINE_HANDOFF.md. Say the word and it gets
+committed as usual with (AI-assisted).
+
+**HW test (one sitting, both issues):**
+1. Save menu → picture must be SHARP again (also check the title screen backdrop);
+   log: `sky halfres N fail 0 nodraw K menu L` — `menu` must climb during menus/title
+   and stay flat in gameplay; b5 in `gpu top` should still be 1-3 ms in gameplay
+   (full-res only in menus, where the sky bucket is 3 quads ≈ cheap).
+2. Play to a level transition (the walls repro: enter an area, leave it, stream
+   another level, come back): walls must be textured on return. Log must show
+   `[loader] FIX125 pressure: pool defer window 3600 -> 120` lines WITHOUT any
+   `[loader] FIX131 slot guard` line (guard stays held-while-linked — buffer
+   pressure no longer drops it), and any `[pool] unload` of a page GOAL still links
+   is now visible unconditionally (that would be a NEW bug signature to report).
+
+
+
+## Handoff — J12 jak3 visuals triage: four gated probes deployed (2026-11-19, AI-assisted)
+
+User HW report on the Nov 19 jak3 session (NRO 6426abe0): minimap split (circle one
+side, square the other), Jak has no eyes, "a lot of things missing".
+
+**Log audit (hw-logs/jak3-20261119/, card md5 still 6426abe0):**
+- Init healthy: 70 tex-bucket eye lists, anim slots 12/100, buckets=321, 60 fps in city.
+- Eye pass RUNS (eye draws 43240 / 3660 frames = 11.8/frame = jak2's rate), so the
+  PrisTexEyes walk + TEX_LCOM coverage are fine; the suspect is content or sampling
+  (jak3 differs from jak2 in BOTH: EYE_BASE_BLOCK 504 vs 8160, and the 64-px atlas
+  layout add_draw_to_buffer_64).
+- Counters jak2 keeps at zero, jak3 does not: **notex 169517** (~46/frame draws with
+  ZERO samplers bound; dkgl renders them on stale bindings, GL would use the
+  placeholder) and **blit bad 8933** (~2.4/frame; likely BlitDisplays' FramebufferCopier
+  or its copy_back form -- dkgl's blit support covers only frame->attached-tex / depth).
+- Minimap mechanism mapped: minimap renders OFF-SCREEN (hud bucket 579 ProgressRenderer,
+  128x128 FBO "PC-MAP" at fbp 126 / TBP 4032), then the circle frame samples it.
+  `minimap.gc:3065` sets :fbp from *map-texture-base* (dynamic), and the HW stdout has
+  no "Unknown fbp" -> the addresses DO land on 126/4032; the off-screen pass engages.
+  A break anywhere in capture->FBO replay->re-publish->sample splits the square from
+  the circle. NOT two renderers: circle + square both draw through bucket 579.
+
+**Built + deployed this session (NRO 5247f2b70bdc1dde732a82568e22f3c0, card verified):**
+- Eye probe wired for jak3 (was jak1-only): flag `gk_dkgl_eyeprobe.txt`, copies run
+  from record_frame_fence after the last list; logs the 40-slot content map + the
+  EyeRenderer iris/pupil/lid source-miss tbps.
+- New map probe `gk_dkgl_mapprobe.txt` (map_probe, dkgl_frame.cpp): copies the minimap
+  FBO after the frame; logs EMPTY/partial/content + avg rgba. "no dk image" would
+  mean the off-screen FBO never materialized a dk texture.
+- New notex probe `gk_dkgl_notexprobe.txt`: logs the bucket id of every zero-sampler
+  draw (budget 24).
+- New blit probe `gk_dkgl_blitprobe.txt`: logs failing blit params with reason
+  (depth-unmet / color-cond / materialize).
+- All four flag files are ALREADY on the SD (switch/jak3/). dk-lint PASS; docker build
+  clean (15/15, 0 errors).
+
+**Next session:** user runs jak3 in the city >= 60 s; pull the log; the four probe
+blocks name the broken links; fix from data. Jak2 walls/bridges + J8 stay parked.
+
+
+## Handoff — FIX 135 jak2 save-picture AGAIN: menu-entry frame hole (2026-11-19, AI-assisted)
+
+**User report (mid-HW-check):** "jak 2 save file the picture on the right is broken
+again even if we fixed before." Verified first: the card still runs the FIX 134 NRO
+(`ea61ea4b`) -- nothing redeployed since (the jak3 session only touched jak3.nro), and
+NO jak2 log was ever pulled after the FIX 133/134 deploy, so that fix was never
+actually verified on the save screen. Not a lost fix: an untested entry path.
+
+**Root cause (code-audited, dkgl_frame.cpp + blit-displays.gc + sky-tng.gc + warp):**
+FIX 134 exempts the sky bucket from the half-res round-trip only when the PREVIOUS
+sky draw count <= 8. At menu ENTRY FROM GAMEPLAY the previous count is 20+, so the
+entry frame runs 720->360->720 -- and that entry frame is exactly the one the menu
+captures: `blit-displays.gc` fires `fx-copy-buf` (bucket-3 PC_PORT 0x10, the frozen
+frame the save screen draws) on that frame, and sky-tng's menu branch draws BOTH
+`tbp #x4c0` (the warp copier's capture, bucket 317, `Warp::m_tbp = 1216`) and the
+fresh `#x3300` PC-BLIT. The "one frame rides half-res behind the fade-in, invisible"
+claim was wrong: the capture side bakes the blurred entry frame in for the WHOLE menu
+session. Pause/title entry (sky already menu-sized) was covered; gameplay entry was
+not -- consistent with "looked fixed, broken again on the same NRO".
+
+**FIX 135 (dkgl_frame.cpp, NRO-only, no GOAL changes):**
+- The queued jak2 BUCKET_3 `blit_prev` blit segment (fx-copy-buf, menu-entry-only per
+  blit-displays.gc: `menu-mode && !screen-copied`) now sets `s_sky_menu_entry`; bucket
+  3 runs BEFORE the sky bucket, so the same frame's decision sees it:
+  `sky_menu = prev<=8 || s_sky_menu_entry` -> the ENTRY frame is full-res too, and the
+  captures in it (0x3300 blit_prev + the 317 warp copy) read a sharp frame. Flag is
+  one-shot, cleared in `capture_begin`.
+- New `late J` stat (`sky halfres N fail M nodraw K menu L late J`): frames where
+  half-res RAN but the sky bucket turned out menu-sized (drew <= 8) = exemption miss
+  that still blurs. Pure evidence: if the user sees the picture broken while `late`
+  climbs, the save screen's own sky exceeds the threshold (raise `kSkyMenuDrawMax` /
+  add the retro-skip); if `late` is 0 the display is full-res and any remaining blur is
+  on the capture side.
+- Zoom-blur/slow-time (`0x13/0x15`, also bucket 3) can trip the flag: worst case one
+  full-res sky frame during those rare effects -- harmless.
+
+**LOG EVIDENCE (pulled from the card mid-deploy, `hw-logs/jak2-savepic-20261119/`):**
+the fresh run log (two boots, the session the user saw the broken picture) shows
+`sky halfres 34/61 fail 0 nodraw 1 menu 626 -> 1799` -- the `menu` counter CLIMBED
+through the whole save-menu session (steady-state display was FULL-RES, FIX 134 doing
+its job), while only a handful of half-res frames ran (the menu entries). Broken
+picture + climbing `menu` = the blur is baked into the CAPTURE on the entry frame --
+exactly the hole FIX 135 plugs. (Counter-case rejected: if `menu` had stayed flat
+during the save screen, the exemption itself would have been failing.)
+
+**Built + deployed (NRO-only, no GOAL changes; card was back, mounted):**
+`check-switch.sh jak2` PASS (build 14/14 clean, EL0 audit clean, dk-lint PASS). NRO
+`a6226482fb15920b02e42361a4c215d6` deployed to `switch/jak2/jak2.nro`, md5-verified
+ON-card post-copy, old `ea61ea4b` rotated to `jak2.nro.bak-ea61ea4b`, `._*` purged.
+
+**HW check (one sitting):** open the save menu BOTH from gameplay pause AND from the
+title screen -> the picture on the right must be sharp in both. Log must show `menu`
+climbing at every menu entry and `late 0`; note what `late` does if anything still
+looks blurred, and whether the title backdrop stays sharp.
+
+**Uncommitted set (now 6 files):** dkgl_frame.cpp (FIX 135 + the jak3 probes from the
+previous entry), Loader.cpp + TexturePool.cpp + dkgl_draw.cpp + dkgl_texture.cpp
+(FIX 133 + probes), DKGL_TODO.md (§7.2 FIX 135), CLINE_HANDOFF.md.
+
+
+
+## Handoff — J13 jak3 "missing rendering" audit + FIX 136 rev-blit built (2026-11-19, AI-assisted)
+
+User report after the J12 probe run: "minimap square and circle both right side,
+separated; no sky, no desert effects, gun-shoot fx, metal-head gem — analyse all the
+rendering and recompile what's missing."
+
+**Audit conclusion (code-side, full session):** NOTHING is missing from the wiring.
+Every GL-registered jak3 renderer is in the dkgl table (J1-J4 census: 321 buckets,
+merc/generic x10, sky 5+7, warp 576, blit 3, ocean, 3x shadow, HUD 579/581/582,
+debug 583-585, eyes, particles 570, hfrag 8, fog). The "missing rendering" is
+broken REPLAY LINKS, and the Nov-19 log names the two big ones: `blit bad`
+1.0/frame from the very first title frame (jak2: 0) and `notex` 32-46/frame.
+Symptom mapping (to be confirmed from the probe blocks, NOT guessed further):
+sky -> zero-sampler sky quads or a failing SkyBlendGPU blit; minimap -> the
+128x128 "PC-MAP" FBO re-publish blit; gun/desert overlays -> the BlitDisplays
+0x10/0x11 copy-back family (do_copy_back is NOT wired in the dkgl driver -- known,
+deliberate; see below); gem -> texanim runs (jak3 clut slots landed in J4), check
+the notex bucket ids.
+
+**Root-caused blind (from the code, no probe needed):** every glBlitFramebuffer
+with a NONZERO read FBO was rejected by dkgl (only frame->tex and the depth alias
+were supported). `render_fb` is 0 in dkgl, so BlitDisplays' copy_now works; the
+per-frame reject is an in-bucket read-FBO blit (minimap re-publish / sky blend /
+warp family -- the blitprobe params will name the exact one, its rect sizes
+identify the renderer: 128x128 = minimap, fullscreen = sky/copier).
+
+**FIX 136 (built this session, NRO `8b17c959849cebb44588e82c19558597`, NOT
+deployed -- SD not mounted):** the two missing blit directions, behind A/B flag
+`gk_dkgl_revblit.txt` on the SD (absent = exact old reject behaviour):
+- read-FBO -> frame: emitter `blit_tex_to_frame` (the §7.2 sky-composite machinery,
+  Full barriers inside dkdev::blit_to_frame).
+- read-FBO -> draw-FBO: new emitter `blit_tex_to_tex` + Segment `blit_src_tex` +
+  image->image replay in record_bucket (Full barrier, blit, Full barrier +
+  DkInvalidateFlags_Image per P3).
+- depth attachments excluded (GL rejects those as colour blits too); dst marked
+  rendered-to so T106 barriers the first sampler.
+- New stats readout `revblit %llu` appended to the [dkgl] line: with the flag on,
+  `blit bad` must drop by the rate `revblit` climbs. THAT is the A/B result.
+dk-lint PASS, `check-switch.sh jak3` PASS (build ok, 10 pre-existing warnings, EL0
+audit clean), md5 independently re-verified after the build.
+
+**Deliberately NOT done:** wiring `do_copy_back` (0x11 / zoom-blur / slow-time) into
+the dkgl driver. The bucket-3 capture replays from blit_prev (LAST frame's presented
+image, the §7.0 C menu fix), so a naive copy-back would smear one frame of lag every
+frame, and its flip/orientation is unproven. Wait for the blitprobe + a visual A/B.
+
+**Next session (SD needed -- it was NOT mounted all session, user must insert it):**
+1. Pull `/Volumes/SWITCH SD/switch/jak3/gk_run_log.txt` -- the Nov-19 probe run's four
+   blocks (eyeprobe/mapprobe/notexprobe/blitprobe) are in it. Archive to
+   `hw-logs/jak3-probes-<date>/`.
+2. Read the blitprobe params: they confirm which renderer the failing 2.4/frame
+   blits belong to, and whether FIX 136's directions cover them.
+3. Deploy NRO `8b17c959` (rotate old `5247f2b7` to `jak3.nro.bak-5247f2b7`), create
+   the flag file `switch/jak3/gk_dkgl_revblit.txt`, purge `._*`, eject.
+4. One city run >= 60 s: stats line must show `blit bad` ~0 and `revblit` climbing at
+   the old bad rate; check sky, minimap (square+circle together, right position),
+   gun fx, metal-head gem. Then fix the notex buckets the notexprobe named.
+
+
+
+## Handoff — J14 the REAL jak3 root cause: dkgl texture-table overflow + truncated stats line; FIX 137/137b deployed (2026-11-19, AI-assisted)
+
+User re-mounted the SD and told me to continue while they test. Pulled and archived
+the four J12/J13 probe blocks: `hw-logs/jak3-probes-20261119/` (gk_run_log.txt,
+gk_stdout.txt, gk_boot_log.txt + .boot1, all from NRO 5247f2b7's run).
+
+**Probe verdict — the "missing blit directions" theory (FIX 136's premise) was WRONG:**
+
+- blitprobe: all 24 sampled rejects IDENTICAL: `read_fbo 0 bound_fbo 166 f 1 t 0
+  mask 4000 src 0,0-1280,720 dst 0,0-1280,720` = frame -> a BlitDisplays
+  FramebufferCopier FBO whose attached GL texture is 0. NOT read-FBO blits at all.
+- mapprobe: `no dk image for the minimap FBO (gl 0, dk 0) -- disabling` = the
+  ProgressRenderer minimap FBO's texture is GL id 0.
+- eyeprobe: `no image for any slot -- disabling` = all 40 PC-EYES GL textures are 0.
+- notexprobe: bucket 1001 = `kTexAnimList`, zero-sampler draws (the texanim
+  composite targets are GL id 0) — the metal-head gem family.
+- `blit bad` 1.8/frame steady (5502/3060), `notex` ~30/frame, `eye draws 24312`
+  (lists ran, sampled id-0 textures).
+- Smoking gun in gk_stdout.txt: `[dkgl] object table full: textures` AT BOOT.
+
+**Root cause:** TextureAnimator's `OpenGLTexturePool` preallocates 334 GL textures
+at init and keeps every one live (jak3 list: 4x4x3 ... 128x128x185 ... 256x256x7;
+jak2's list is IDENTICAL). dkgl's `kMaxTextures` was 256 -> the table filled
+mid-init -> every glGenTextures after it returned 0. Everything created after the
+animator silently drew to/sampled id 0: minimap FBOs (3), BlitDisplays copiers (3),
+40 eye textures, texanim targets, PC-WARP/PC-BLIT. All four probes named exactly
+those. (jak2 "worked" only by construction ORDER luck — its copiers were created
+before the animator filled the table.)
+
+**FIX 137 (NRO-only):** `kMaxTextures` 256->1024, `kMaxFbos` 256->512 (title screen
+alone reaches FBO id 166; every texanim VRAM entry owns an FBO), `kMaxBuffers`
+512->1024, `kMaxVaos` 128->256 (jak3: 321 buckets). `note_table_full` now logs ONCE
+PER TABLE (the old once-per-process static swallowed every later overflow — a
+buffers/FBO full after the first note was invisible) and prints live counts of all
+four tables (new `live_tex_count()`/`live_fbo_count()` accessors, dkgl_state.h/.cpp
++ dkgl_texture.cpp). Memory cost ~175 KB of globals.
+
+**FIX 137b (found while verifying): `switch_run_logf` truncates at a 512-byte stack
+buffer** — the dkgl stats line grew past 512 chars with FIX 135/136, so the `late`
+and `revblit` A/B readouts were being SILENTLY CUT on HW (card logs show the line
+ending at ~"sky halfres N fail 0"; the deployed jak2 NRO a6226482 contains
+`late %llu` but its log can never print it). `buf[512]` -> `buf[2048]` in
+game/switch/run_log.h. Without this, the FIX 136 A/B would have been unreadable.
+
+**Deployed (jak3):** `check-switch.sh jak3` PASS (build ok, 80 warnings all
+pre-existing sources, dk-lint PASS, EL0 audit clean). NRO md5
+`dd0ff831eaf67ef913d96fe0aa52ddcf` (16,564,313 B) -> `sdmc:/switch/jak3/jak3.nro`,
+md5-verified ON-card post-copy. Old probe NRO rotated to `jak3.nro.bak-5247f2b7`.
+Probe-era logs rotated to `*.j13probes` (already archived locally first). Flag
+`gk_dkgl_revblit.txt` created next to the four probe flags; `._*` purged. This NRO
+supersedes the never-deployed `8b17c959` (FIX 136 + 137 + 137b together).
+
+**jak2 also rebuilt + deployed (same fixes; its pool is also 334 and its `late` A/B
+was unreadable):** `check-switch.sh jak2` PASS (80 warnings, all pre-existing
+sources). NRO md5 `26c1fba5b86b0fccde416f53f8b0d0e0` (16,561,771 B) ->
+`sdmc:/switch/jak2/jak2.nro`, md5-verified on-card; old `a6226482` rotated to
+`jak2.nro.bak-a6226482`. The FIX-135-era session log was archived to
+`hw-logs/jak2-fix135-20261119/` and rotated on the card to `*.fix135`. That log's
+signature: `blit bad 0 | notex 0`, `menu` climbing 626->6052 through save-menu
+sessions, halfres counts tiny — FIX 134/135 behaving; `late` was unreadable in it
+(the 512-byte truncation) — with `26c1fba5` the next jak2 run prints `late`, which
+completes the FIX 135 verification (`late 0` + sharp save picture).
+
+**Next HW run (jak3, NRO dd0ff831):** one city run >= 60 s, then pull the log:
+1. `blit bad` should be ~0 (the 1.8/frame rejects were dst-tex-0; read_fbo==0 ->
+  existing frame->tex path now that t exists). `revblit` climbs only for genuine
+  read-FBO blits (sky blend / warp publish) — if it stays 0, FIX 136's directions
+  are unused so far; if `blit bad` still climbs, the blitprobe prints the new shape.
+2. mapprobe should ARM and print a content map (no more "gl 0"); eyeprobe arms
+  40/40. notex ~0.
+3. Visuals: sky, minimap square+circle together in the right place, eyes on Jak,
+  gun fx, metal-head gem (texanim). The stats line tail is now readable: `late`,
+  `revblit` print.
+4. Then chase whatever the probes STILL name (they self-disable after 5 rounds).
+
+## FIX 138 (2026-11-18/19) — jak3 missing rendering wired: BlitDisplays end-of-frame effects
+
+The one rendering family GL draws that dkgl never consumed. BlitDisplays::render (bucket
+3/BLIT_START) arms pendings from PC_PORT 0x11 (copy-back), 0x13 (zoom blur), 0x14 (color
+filter), 0x15 (slow-time); GL consumes them in do_copy_back / apply_color_filter, which
+never ran on dk. jak3 USES them (light-jak transformation, fast camera zooms,
+blit-displays.gc).
+
+- Shaders `simple_texture` + `slow_time` through the T103 generator + CMake.
+- `do_copy_back` captured at capture_end into a new `kCopyBackList` (jak2+jak3 tables,
+  census 321->322), replayed by `dkgl::record_copy_back()` right before record_blackout
+  (exact GL order). `apply_color_filter` captured inside the TEX_HUD_HUD_ALPHA bucket at
+  GL's position. Both wrapped in `set_int_attrib_draws(true)` (GL_INT index attribs).
+- A/B flag `gk_dkgl_copyback.txt`: absent = pendings never consumed (pre-FIX-138
+  behavior). PRE-CREATED on the jak3 card for the next run — delete it first for a pure
+  FIX-137 verification. One-shot `[copyprobe]` logs per opcode work either way; stats
+  line gains `copyback zoomblur slowtime colorfilt` counters.
+- Side discovery fixed: `record_bucket`'s side-list guard missed `kBlackoutList`, so the
+  gen2 world loop replayed the fade quad TWICE per fading frame (mid-fades darker than
+  GL). record_blackout is now a side-list call; guard covers all five special ids.
+- Stale-pending note: with the flag absent, pendings are never cleared (GL clears them
+  every frame) — enabling the flag later plays at most one stale effect on the first
+  armed frame.
+
+Builds: dk-lint PASS; check-switch.sh PASS — jak3 NRO `175ff978` (deployed, prev
+`dd0ff831` as .bak), jak2 NRO `00a61bad` (deployed, no copyback flag on jak2).
+Next run reads: the J14 checklist PLUS copyback/zoomblur counters during a light-jak
+transformation or a fast zoom, and the first-occurrence `[copyprobe]` params.

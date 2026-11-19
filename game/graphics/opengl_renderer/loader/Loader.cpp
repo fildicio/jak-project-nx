@@ -1959,23 +1959,46 @@ void Loader::update(TexturePool& texture_pool) {
   // (this function and dk pool creation), so the plain store is safe.
   {
     static bool s_fix125_pressure = false;
-    const bool tex_pressure =
-        loader_under_pressure() || dktexgpu::failed_allocs() > 0;
+    // FIX 133 (AI-assisted): split the pressure signals. The probe-flood HW log
+    // (hw-logs/jak2-probe-flood-20261118) showed the FIX 125 fallback firing on
+    // buffer-pool dryness alone: loader_under_pressure() is the GEOMETRY staging
+    // pool (< 16 MB, routine during a level stream -- the lwidea upload at
+    // t=166 s), while the texture store never failed ([dk] "tex ... fail=0" the
+    // whole session). That false positive dropped the FIX 131 slot guard to 3600
+    // frames, and the t=168.9 s retry then unloaded page 853 (ruins, still
+    // linked, draw-idle > 60 s) with no re-give ever following -- black walls on
+    // return. The slot guard now yields ONLY when the texture heap itself is
+    // failing: failed_allocs() is monotonic, so compare against the last-seen
+    // count (a sustained-full store keeps failing retries -> stays pressured;
+    // one transient failure yields for a single update). Buffer-pool pressure
+    // keeps governing only the FIX 125 draw-stamp defer window, which cannot
+    // blacken a linked page on its own.
+    static bool s_fix133_guard_pressure = false;
+    static int s_fix133_tex_fails_seen = -1;
+    const int tex_fails_now = dktexgpu::failed_allocs();
+    const bool tex_heap_pressure =
+        s_fix133_tex_fails_seen >= 0 && tex_fails_now > s_fix133_tex_fails_seen;
+    s_fix133_tex_fails_seen = tex_fails_now;
+    const bool tex_pressure = loader_under_pressure() || tex_heap_pressure;
     if (tex_pressure != s_fix125_pressure) {
       s_fix125_pressure = tex_pressure;
-      switch_run_logf("[loader] FIX125 pressure: pool defer window %s, slot guard %s",
-                      tex_pressure ? "3600 -> 120 frames" : "back to 3600 frames",
-                      tex_pressure ? "held-while-linked -> 3600 frames"
-                                   : "back to held-while-linked");
+      switch_run_logf("[loader] FIX125 pressure: pool defer window %s",
+                      tex_pressure ? "3600 -> 120 frames" : "back to 3600 frames");
       texture_pool.set_defer_frames(tex_pressure ? TexturePool::kPoolDeferFramesPressure
                                                   : TexturePool::kPoolDeferFrames);
-      // FIX 131 (AI-assisted): keep the slot-linked guard an order of
-      // magnitude longer than the draw-stamp window under pressure -- the
-      // nozb1 log proved a 120-frame pressure window is what let the gungame
-      // purge kill course tpages GOAL had uploaded 0.9 s earlier. ~60 s idle
-      // is the last resort, not the default.
-      texture_pool.set_slot_guard_frames(tex_pressure ? TexturePool::kSlotGuardFramesPressure
-                                                      : TexturePool::kSlotGuardFrames);
+    }
+    // FIX 131 (AI-assisted): keep the slot-linked guard held-while-linked
+    // (PS2 semantics) except under genuine TEXTURE-heap pressure, where
+    // kSlotGuardFramesPressure (~60 s idle) is the last resort -- never the
+    // default, and never a side effect of geometry-buffer streaming.
+    if (tex_heap_pressure != s_fix133_guard_pressure) {
+      s_fix133_guard_pressure = tex_heap_pressure;
+      switch_run_logf("[loader] FIX131 slot guard: %s",
+                      tex_heap_pressure ? "held-while-linked -> 3600 frames (texture heap failing)"
+                                        : "back to held-while-linked");
+      texture_pool.set_slot_guard_frames(tex_heap_pressure
+                                              ? TexturePool::kSlotGuardFramesPressure
+                                              : TexturePool::kSlotGuardFrames);
     }
   }
 #endif

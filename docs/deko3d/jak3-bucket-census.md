@@ -122,7 +122,8 @@ the sorted walk is GL dispatch order):
   → **70**.
 - **Merged tie ids**: per level ×6 (TIE master, ETIE_Ln_TFRAG, TIE_Ln_ALPHA, ETIE_Ln_ALPHA,
   TIE_Ln_WATER, ETIE_Ln_WATER) ×10 = **60**.
-- **`kJak3TableMax` = 191 + 70 + 60 = 321.** This becomes the new `kMaxBuckets`
+- **`kJak3TableMax` = 191 + 70 + 60 = 321** (+1 in FIX 138: `kCopyBackList`, the
+  BlitDisplays `do_copy_back` side list — **322**). This becomes the new `kMaxBuckets`
   (`dkgl_frame.cpp:352`) — every `s_lists` / census / renderer array must fit it.
 - **Not in the dkgl table** (native passes own them, drawn at their sorted position by
   `record_jak3_dkgl`): tfrag NORMAL/TRANS per level, shrub per level, HFRAG 8, PARTICLES 570,

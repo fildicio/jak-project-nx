@@ -528,7 +528,11 @@ if(NINTENDO_SWITCH)
                       dkgl/glow_probe_downsample.vert dkgl/glow_probe_downsample.frag
                       dkgl/glow_draw.vert dkgl/glow_draw.frag
                       # T127: Sprite3 distorter (jak2 scattergun heat haze) via dkgl
-                      dkgl/sprite_distort.vert dkgl/sprite_distort.frag)
+                      dkgl/sprite_distort.vert dkgl/sprite_distort.frag
+                      # FIX 138: BlitDisplays end-of-frame effects via dkgl
+                      # (zoom-blur / slow-time / copy-back / color-filter draws)
+                      dkgl/simple_texture.vert dkgl/simple_texture.frag
+                      dkgl/slow_time.vert dkgl/slow_time.frag)
     set(_DKGL_OUTS "")
     foreach(_sh ${_DKGL_SHADERS})
         string(REPLACE "." "_" _nm ${_sh})

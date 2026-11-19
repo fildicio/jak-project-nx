@@ -281,21 +281,39 @@ void primitive_restart_index(u32 index) {
   g_shadow.restart_index = index;
 }
 void note_table_full(const char* what) {
-  static bool s_logged = false;
-  if (!s_logged) {
-    s_logged = true;
-    u32 live_vaos = 0, live_bufs = 0;
-    for (u32 n = 1; n <= kMaxVaos; ++n) {
-      live_vaos += g_vaos[n].live ? 1u : 0u;
+  // FIX 137 (AI-assisted, J14): log once PER TABLE, not once per process. The old single
+  // static meant the first "textures" full swallowed every later overflow silently -- a
+  // buffers/VAO/FBO full after it would have been invisible (the 2026-11-19 hw log shows
+  // the once-only note firing at init while the tables kept filling later).
+  static const char* s_logged[8] = {};
+  int slot = -1;
+  for (int i = 0; i < 8; ++i) {
+    if (!s_logged[i]) {
+      slot = i;
+      break;
     }
-    for (u32 n = 0; n < kMaxBuffers; ++n) {
-      live_bufs += g_buffers[n].live ? 1u : 0u;
+    if (std::strcmp(s_logged[i], what) == 0) {
+      return;  // this table's overflow was already logged
     }
-    std::fprintf(stderr,
-                 "[dkgl] object table full: %s (raise kMax* in dkgl_state.h; live vaos %u/%u, "
-                 "live buffers %u/%u)\n",
-                 what, live_vaos, kMaxVaos, live_bufs, kMaxBuffers);
   }
+  if (slot < 0) {
+    return;  // more than 8 distinct tables: impossible, but stay silent
+  }
+  s_logged[slot] = what;
+  u32 live_vaos = 0, live_bufs = 0;
+  for (u32 n = 1; n <= kMaxVaos; ++n) {
+    live_vaos += g_vaos[n].live ? 1u : 0u;
+  }
+  for (u32 n = 0; n < kMaxBuffers; ++n) {
+    live_bufs += g_buffers[n].live ? 1u : 0u;
+  }
+  const u32 live_texs = live_tex_count();
+  const u32 live_fbos = live_fbo_count();
+  std::fprintf(stderr,
+               "[dkgl] object table full: %s (raise kMax* in dkgl_state.h; live vaos %u/%u, "
+               "buffers %u/%u, textures %u/%u, fbos %u/%u)\n",
+               what, live_vaos, kMaxVaos, live_bufs, kMaxBuffers, live_texs, kMaxTextures,
+               live_fbos, kMaxFbos);
 }
 void get_integerv(u32 pname, int* out) {
   if (!out) {

@@ -45,13 +45,20 @@ namespace {
 // loader filling that PcTextureId, [pool] placeholder-new = a link before the
 // give, [pool] unload = the entry going placeholder again.
 bool tex_probe_page(u32 page) {
-  // FIX 123 set: 998 hiphog-sprite, 2405 gungame-sprite, 1021 ctysluma-sprite,
-  // 1325 ctyport-sprite. FIX 131 additions (gk_run_log jak2-nozb1 2026-11-18,
-  // the never-given miss class): 853 ruins-vis, 929 ruins, 2929 lwidea-pris,
-  // 3090 title-sprite -- all missed for minutes with no give/purge pair, so
-  // the next hardware run can see who should have given them.
-  return page == 998 || page == 2405 || page == 1021 || page == 1325 || page == 853 ||
-         page == 929 || page == 2929 || page == 3090;
+  // FIX 132 (AI-assisted): probe retired -- it was the hardware perf killer.
+  // The probe pages are hot: 1021/853/2929 link every frame, so [pool] link
+  // logging produced 2.06M lines / a 91 MB gk_run_log in one short session
+  // (gk_run_log jak2-probe-flood 2026-11-18, archived under hw-logs/), and the
+  // render-thread snprintf + mutex + SD-card flushes alone dropped the game to
+  // an abysmal framerate while gpu top stayed healthy (b5 1.1-2.8 ms) -- the
+  // probes, not the render work, were the cost. The black-wall root cause they
+  // investigated is fixed by the FIX 131 slot-guard, and the diagnostic data is
+  // in the archived log, so there is nothing left to trace. Keep the helper so
+  // the five call sites stay intact; it now never logs. To re-probe a page,
+  // add it back here temporarily and rebuild -- never leave hot pages in this
+  // list in a deploy build.
+  (void)page;
+  return false;
 }
 }  // namespace
 #endif
@@ -122,10 +129,14 @@ u64 upload_to_gpu(const u8* data, u16 w, u16 h) {
 
 GpuTexture* TexturePool::give_texture(const TextureInput& in) {
 #if defined(__SWITCH__)
-  if (tex_probe_page(in.id.page)) {
-    switch_run_logf("[pool] give %u/%u %ux%u common=%d %s/%s", in.id.page, in.id.tex, in.w, in.h,
-                    (int)in.common, in.debug_page_name.c_str(), in.debug_name.c_str());
-  }
+  // FIX 133 (AI-assisted): give/unload/placeholder-new/FIX124-done are rare,
+  // event-driven lines (bounded by level streams), so they log unconditionally
+  // -- only the per-frame [pool] link probes flooded the 2026-11-18 session
+  // (2.06M lines / 91 MB), and those stay behind the retired tex_probe_page.
+  // This keeps give/unload pairs auditable on hardware without re-arming any
+  // hot probe page.
+  switch_run_logf("[pool] give %u/%u %ux%u common=%d %s/%s", in.id.page, in.id.tex, in.w, in.h,
+                  (int)in.common, in.debug_page_name.c_str(), in.debug_name.c_str());
 #endif
 #if defined(__SWITCH__)
   // T105 (AI-assisted): dkgl seam. A TextureInput can carry a dkgl-created texture id
@@ -245,11 +256,11 @@ void TexturePool::refresh_links(GpuTexture& texture) {
 
 void TexturePool::unload_texture(PcTextureId tex_id, u64 gpu_id) {
 #if defined(__SWITCH__)
-  if (tex_probe_page(tex_id.page)) {
-    // FIX 123: unloading flips the entry back to placeholder; a tbp still drawn
-    // after this is black forever (no give follows a same-level unload).
-    switch_run_logf("[pool] unload %u/%u", tex_id.page, tex_id.tex);
-  }
+  // FIX 123/133 (AI-assisted): unloading flips the entry back to placeholder;
+  // a tbp still drawn after this is black forever (no give follows a
+  // same-level unload). Rare event -- logs unconditionally (see the
+  // give-site FIX 133 note).
+  switch_run_logf("[pool] unload %u/%u", tex_id.page, tex_id.tex);
 #endif
   auto* tex = m_loaded_textures.lookup_existing(tex_id);
   ASSERT(tex);
@@ -407,11 +418,10 @@ GpuTexture* TexturePool::get_gpu_texture_for_slot(PcTextureId id, u32 slot) {
     placeholder.slots.push_back(slot);
 
 #if defined(__SWITCH__)
-    if (tex_probe_page(id.page)) {
-      // FIX 123: a link arrived before the loader gave this PcTextureId. It is
-      // fine as long as a give follows before the page is drawn.
-      switch_run_logf("[pool] placeholder-new %u/%u (slot=%u)", id.page, id.tex, slot);
-    }
+    // FIX 123/133 (AI-assisted): a link arrived before the loader gave this
+    // PcTextureId. It is fine as long as a give follows before the page is
+    // drawn. Rare event -- logs unconditionally (see the give-site note).
+    switch_run_logf("[pool] placeholder-new %u/%u (slot=%u)", id.page, id.tex, slot);
 #endif
 
     // auto r = m_loaded_textures.insert({name, placeholder});
@@ -566,9 +576,9 @@ size_t TexturePool::retry_deferred_unloads(std::vector<u64>& out_released) {
       m_deferred_unloads[i] = m_deferred_unloads.back();
       m_deferred_unloads.pop_back();
 #if defined(__SWITCH__)
-      if (tex_probe_page(d.tex_id.page)) {
-        switch_run_logf("[pool] FIX124 deferred unload done %u/%u", d.tex_id.page, d.tex_id.tex);
-      }
+      // FIX 124/133 (AI-assisted): rare event -- logs unconditionally (see
+      // the give-site note).
+      switch_run_logf("[pool] FIX124 deferred unload done %u/%u", d.tex_id.page, d.tex_id.tex);
 #endif
     } else {
       i++;

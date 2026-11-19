@@ -830,6 +830,7 @@ void record_gen2_dkgl(const Gen2NativeSplit* splits,
     dkdev::gpu_mark(dkdev::kGpuProfBase + unit);  // end of the last unit
   }
   s_prof_units = unit;
+  dkgl::record_copy_back();  // FIX 138: GL blit_display/do_copy_back runs after every bucket
   dkgl::record_blackout();
   dkgl::record_frame_fence();  // J7: the frame's single slot-fence signal
 }

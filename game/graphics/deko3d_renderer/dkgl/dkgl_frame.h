@@ -61,6 +61,12 @@ bool record_bucket(int bucket);
 // recorded after the last world pass so it covers the HUD too.
 void set_pmode_alp(float alp);
 bool record_blackout();
+// FIX 138 (AI-assisted): the BlitDisplays end-of-frame effects (0x11 copy-back restore,
+// 0x13 zoom blur, 0x15 slow-time) captured into their own list at capture_end -- GL runs
+// do_copy_back after every bucket, before the fade. Call after the LAST record_bucket /
+// record_glow and before record_blackout. A/B flag: gk_dkgl_copyback.txt (absent = the
+// pendings are never consumed, the exact pre-FIX-138 behavior).
+bool record_copy_back();
 // J7 (AI-assisted): ONE slot-fence signal per frame (call from the world recorder after
 // its last record_* call) instead of one per bucket -- a signalFence ctrl command both
 // splits the frame stream into an extra host-gpfifo entry and makes the queue emit a

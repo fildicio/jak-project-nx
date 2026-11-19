@@ -3,8 +3,34 @@
 #include "common/log/log.h"
 
 #include "game/graphics/opengl_renderer/Fbo.h"
+#if defined(__SWITCH__)
+#include "game/switch/run_log.h"  // FIX 138 probe: same gk_run_log.txt as every bring-up line
+#endif
+
+// FIX 138 (AI-assisted): set by dkgl's first capture_begin (Switch only). Arms the
+// one-shot usage logs below, so a hardware run reports whether jak3 actually issues
+// each end-of-frame opcode even with the replay A/B flag absent. Log-only -- no GL
+// behavior changes. The host GL build leaves it false: zero cost there.
+// Lives in namespace dkgl to match the extern in dkgl_frame.cpp.
+namespace dkgl {
+bool g_dkgl_copyprobe = false;
+}
 
 BlitDisplays::BlitDisplays(const std::string& name, int my_id) : BucketRenderer(name, my_id) {}
+
+// FIX 138 (AI-assisted): read-only pending view for the dkgl capture layer. Const, no
+// side effects; the flags themselves are still consumed exactly where GL consumes them.
+BlitPendingInfo BlitDisplays::pending_effects() const {
+  BlitPendingInfo out;
+  out.copy_back = m_copy_back_pending;
+  out.zoom_blur = m_zoom_blur_pending;
+  out.color_filter = m_color_filter_pending;
+  out.slow_time = m_slow_time_pending;
+  out.slow_time_amount = m_slow_time_amount;
+  out.color_filter_rgba = m_color_filter;
+  out.zoom_blur_params = m_zoom_blur;
+  return out;
+}
 
 void BlitDisplays::init_textures(TexturePool& texture_pool, GameVersion version) {
   // set up target texture
@@ -64,6 +90,16 @@ void BlitDisplays::render(DmaFollower& dma,
           // On PC, we set this flag which means that after rendering is finished we copy the saved
           // buffer back.
           m_copy_back_pending = true;
+          // FIX 138 probe (AI-assisted): log-only, one shot.
+          if (dkgl::g_dkgl_copyprobe) {
+            static bool s_logged = false;
+            if (!s_logged) {
+              s_logged = true;
+#if defined(__SWITCH__)
+              switch_run_logf("[copyprobe] 0x11 copy_back pending (restore PC-BLIT at frame end)");
+#endif
+            }
+          }
         } break;
         case 0x13: {
           // copy from render buffer
@@ -72,16 +108,52 @@ void BlitDisplays::render(DmaFollower& dma,
 
           memcpy(&m_zoom_blur, data.data, sizeof(PcZoomBlur));
           m_zoom_blur_pending = true;
+          // FIX 138 probe (AI-assisted): log-only, one shot, with the effect params.
+          if (dkgl::g_dkgl_copyprobe) {
+            static bool s_logged = false;
+            if (!s_logged) {
+              s_logged = true;
+#if defined(__SWITCH__)
+              switch_run_logf(
+                  "[copyprobe] 0x13 zoom_blur: texels %d pos %.1f,%.1f alpha_current %.3f "
+                  "is_2d %u",
+                  (int)m_zoom_blur.texels, m_zoom_blur.pos.x(), m_zoom_blur.pos.y(),
+                  m_zoom_blur.alpha_current, (unsigned)m_zoom_blur.is_2d);
+#endif
+            }
+          }
         } break;
         case 0x14: {
           m_color_filter_pending = true;
           memcpy(m_color_filter.data(), data.data, sizeof(math::Vector4f));
+          // FIX 138 probe (AI-assisted): log-only, one shot.
+          if (dkgl::g_dkgl_copyprobe) {
+            static bool s_logged = false;
+            if (!s_logged) {
+              s_logged = true;
+#if defined(__SWITCH__)
+              switch_run_logf("[copyprobe] 0x14 color_filter rgba %.2f %.2f %.2f %.2f",
+                               m_color_filter.x(), m_color_filter.y(), m_color_filter.z(),
+                               m_color_filter.w());
+#endif
+            }
+          }
         } break;
         case 0x15: {  // slow-time
           m_blur_old_copier.copy_now(render_state->render_fb_w, render_state->render_fb_h,
                                      render_state->render_fb);
           m_slow_time_pending = true;
           memcpy(&m_slow_time_amount, data.data, sizeof(float));
+          // FIX 138 probe (AI-assisted): log-only, one shot.
+          if (dkgl::g_dkgl_copyprobe) {
+            static bool s_logged = false;
+            if (!s_logged) {
+              s_logged = true;
+#if defined(__SWITCH__)
+              switch_run_logf("[copyprobe] 0x15 slow_time: amount %.3f", m_slow_time_amount);
+#endif
+            }
+          }
         } break;
       }
     }

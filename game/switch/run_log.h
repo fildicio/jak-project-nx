@@ -213,7 +213,11 @@ inline void switch_run_logf(const char* fmt, ...) {
   static int s_dropped = 0;       // lines lost to a full buffer, reported on the next flush
   static bool s_noted_busy = false;  // one LOCKBUSY note per flush window, not per line
 
-  char buf[512];
+  // FIX 137b (AI-assisted, J14): 512 was too small for the dkgl stats line -- it grew past
+  // 512 chars with FIX 135/136 (the `late` and `revblit` tails), and HW logs showed the
+  // line silently truncated at ~"sky halfres N fail 0", hiding the A/B readouts. 2048
+  // covers it with room for more counters.
+  char buf[2048];
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - s_t0)
                       .count();
