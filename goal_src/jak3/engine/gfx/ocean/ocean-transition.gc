@@ -486,6 +486,11 @@
   )
 
 (defmethod ocean-make-trans-camera-masks ((this ocean) (arg0 uint) (arg1 uint) (arg2 uint) (arg3 uint))
+  ;; og:switch FIX 147 - trans-camera-masks is a 4x4 window. A mid box wider than 4 cells
+  ;; (seen after death/respawn) wrote past it and OR'd 0x0f into *ocean* sprite-tmpl2's dma tag.
+  (when (or (>= arg2 (the-as uint 4)) (>= arg3 (the-as uint 4)))
+    (return 0)
+    )
   (let ((sv-48 (the-as ocean-trans-mask (&-> this trans-camera-masks (+ (* arg2 4) arg3))))
         (sv-52 (-> *math-camera* trans))
         (sv-56 (new-stack-vector0))
@@ -762,7 +767,8 @@
                 )
             (while (>= t2-0 t1-0)
               (let ((sv-40 (the-as ocean-trans-mask (&-> this trans-camera-masks (+ (* (- a3-1 sv-34) 4) (- t1-0 sv-32))))))
-                (when (nonzero? (-> sv-40 word))
+                ;; og:switch FIX 147 - don't read past the 4x4 trans-camera-masks window
+                (when (and (< (- a3-1 sv-34) 4) (< (- t1-0 sv-32) 4) (nonzero? (-> sv-40 word)))
                   (dotimes (t3-10 4)
                     (let ((t4-4 (-> sv-40 mask t3-10)))
                       (when (nonzero? t4-4)

@@ -207,6 +207,24 @@ void TexturePool::move_existing_to_vram(GpuTexture* tex, u32 slot_addr) {
     slot.source = tex;
     slot.gpu_texture = tex->gpu_textures.front().gl;
   }
+#if defined(__SWITCH__)
+  // FIX 143 probe (AI-assisted): VRAM slot 4032 is the pause-menu/HUD map page sample
+  // (ProgressRenderer's minimap FBO publish). GOAL's own texture loads also land there
+  // (the 2026-11-20 run displaced it with level-default-sprite/lasersmoke-31), and the
+  // map page only works if the pool points back at PC-MAP when the menu draws. Log
+  // every SOURCE CHANGE for this slot so the publish/displace timeline is readable in
+  // one HW run (event-driven, capped like the FIX 133 give/unload lines).
+  if (slot_addr == 4032) {
+    static GpuTexture* s_last_4032 = nullptr;
+    static u32 s_4032_lines = 0;
+    if (slot.source != s_last_4032 && s_4032_lines < 400) {
+      s_last_4032 = slot.source;
+      s_4032_lines++;
+      switch_run_logf("[pool] slot 4032 <- pc %u/%u %ux%u", (unsigned)tex->tex_id.page,
+                      (unsigned)tex->tex_id.tex, tex->w, tex->h);
+    }
+  }
+#endif
 }
 
 u64 TexturePool::pool_id(GLuint gl_texture) {

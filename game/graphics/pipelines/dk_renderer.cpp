@@ -1016,6 +1016,29 @@ void dk_loader_start() {
     dksprite::set_game(g_game_version);  // J3: flag&0x30 corner order
     dkmerc::set_game(g_game_version);
     dkdirect::set_game(g_game_version);
+    // FIX 144 (AI-assisted): one-shot DMA chain dump for jak3, same R1 mechanism as jak1
+    // (dktf::capture_chain counts down only on frames whose first tfrag pass is valid, so
+    // the wait counts IN-LEVEL frames). The hfrag capture has never yielded a packet on
+    // hardware (desert ground never drew -- see HfragDk.cpp FIX 144); a real desert chain
+    // on disk is the definitive offline evidence for the walk if the bucket-8 raw dump in
+    // the run log doesn't already name the failure. File holds the in-level frame wait.
+    {
+      char path[96];
+      snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_dkdump.txt",
+               game_version_names[g_game_version]);
+      if (FILE* f = fopen(path, "r")) {
+        int frames = 300;
+        if (fscanf(f, "%d", &frames) != 1 || frames < 0) {
+          frames = 300;
+        }
+        fclose(f);
+        char dir[64];
+        snprintf(dir, sizeof(dir), "sdmc:/switch/%s", game_version_names[g_game_version]);
+        dktf::arm_replay_dump(dir, frames);
+        switch_run_logf("[dk] replay dump armed: jak3, after %d in-level tfrag frames",
+                        frames);
+      }
+    }
     s_dk_jak3_dkgl = dkgl::init(s_dk_tex_pool.get(), s_dk_loader.get());
     if (s_dk_jak3_dkgl) {
       char path[96];

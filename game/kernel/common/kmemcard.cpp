@@ -502,7 +502,31 @@ static const McHeaderCache* mc_get_header_cached(int bank_idx, const fs::path& p
  * unchanged; it is simply refreshed a quarter as often, which is far more often than a
  * save file can actually change.
  */
+/*!
+ * FIX 153 (AI-assisted): stop polling the SD card every frame.
+ *
+ * auto-save-check (GOAL, end of every display frame, jak2 + jak3) calls mc-get-slot-info ->
+ * MC_get_status -> here, and each call did 2-6 stat()s under SWITCH_FS_LOCK -- the lock the
+ * overlord's audio/anim streaming holds during its reads. Hardware profile (jak3 city, FIX
+ * 151/152 [goal] lines): with the EE thread alone on core 0 it still sat OFF-core ~11 ms of
+ * every ~19 ms frame, all of it between the end of the "sound" block and the end of the
+ * display process (level-update / mc-run / auto-save-check), i.e. blocked waiting for this
+ * lock while jak3's streaming held it.
+ *
+ * This port is the only writer of the save files, and mc_apply_async_result() already updates
+ * mc_files[] itself after every save/load. So the card only has to be scanned once (4 frames,
+ * one slot each, as FIX 39a) at boot and again after any card operation finishes.
+ */
+static int s_mc_rescan_frames = 4;
+void mc_mark_card_dirty() {
+  s_mc_rescan_frames = 4;
+}
+
 void pc_update_card() {
+  if (s_mc_rescan_frames <= 0) {
+    return;  // mc_files[] is current; no filesystem access on the GOAL thread
+  }
+  s_mc_rescan_frames--;
   mc_print_poll("update-card: begin");
   // int highest_save_count = 0;
   mc_last_file = -1;
@@ -769,6 +793,7 @@ static McAsyncResult mc_worker_load(const McLoadRequest& req) {
 // ---------------------------------------------------------------------------
 // defined below; the sliced machine applies its result through it
 static void mc_apply_async_result(const McAsyncResult& res, bool was_save);
+void mc_mark_card_dirty();
 
 namespace {
 // bytes written per MC_run() step. 16 KiB keeps a step at ~1-2 ms on the
@@ -1037,6 +1062,7 @@ void mc_sliced_save_step() {
  * load, and immediately for skipped redundant saves).
  */
 static void mc_apply_async_result(const McAsyncResult& res, bool was_save) {
+  mc_mark_card_dirty();  // FIX 153: re-check the files once after any card op
   op.operation = MemoryCardOperationKind::NO_OP;
   op.result = res.status;
   if (res.status == McStatusCode::OK) {

@@ -298,6 +298,16 @@ void uniform3f(int location, float x, float y, float z) {
   const float v[3] = {x, y, z};
   write_uniform(location, v, 12);
 }
+// FIX 139a (AI-assisted): glUniform2f was a glad census no-op -- the 2026-11-20 HW run
+// fired gl-census #6 (glUniform2f) at the first 0x13 zoom-blur. FullScreenTexDraw sets
+// tex_coord_0 / tex_coord_1 with it, so the FIX 138 zoom-blur / slow-time / color-filter
+// composites sampled a degenerate (0,0)-(0,0) rect and the scattergun level-2 blast
+// blacked the whole screen out (zoom_blur clears, then the composite draws "old image"
+// from one texel). 8 bytes into the 16-byte std140 slot, same shape as uniform3f.
+void uniform2(int location, float x, float y) {
+  const float v[2] = {x, y};
+  write_uniform(location, v, 8);
+}
 // T125 (AI-assisted): TextureAnimator corner tables. positions/uvs are vec3[4]/vec2[4]
 // ARRAYS -- std140 gives every element a 16-byte stride while glUniform3fv/2fv pass
 // tightly packed data, so spread the elements into a stride-16 staging buffer. A single

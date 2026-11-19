@@ -78,6 +78,9 @@ MemInfo get_memory_info();
 void switch_thread_core_report(const char* role);
 unsigned int switch_pin_current_thread(const char* role, int core);
 void switch_core_diag_periodic(const char* role);
+// FIX 151 (AI-assisted): CPU time the calling thread actually ran (all cores), in ns.
+// Wall time minus this = time the thread was runnable/blocked but not on a core.
+unsigned long long switch_thread_cpu_ns();
 
 /*!
  * FIX 71 -- CPU boost mode during blackout loads (PERF_PLAN_NEXT_AGENT.md step 2).

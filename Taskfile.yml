@@ -98,6 +98,14 @@ tasks:
     desc: "Build the project using the generated CMake"
     cmds:
       - "cmake {{.CMAKE_BUILD_DIR_DEBUG}} --parallel 8"
+  build-extractor:
+    desc: "Build only the host-side extractor binary (used by extractor-app)"
+    cmds:
+      - "cmake {{.CMAKE_BUILD_DIR_RELEASE}} --target extractor --parallel 8"
+  extractor-app:
+    desc: "One-click GUI: ISO -> extract/decompile/compile(arm64) -> Switch SD-card package"
+    cmds:
+      - "{{.PYTHON}} ./scripts/switch/extractor_app.py"
   repl:
     desc: "Start the REPL"
     preconditions:

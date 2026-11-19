@@ -1823,6 +1823,7 @@
       (let ((s5-0 *kernel-context*))
         (case (-> arg0 status)
           (('waiting-to-run 'suspended)
+           (profiler-start-event (-> arg0 name)) ;; og:preserve-this FIX 150, as jak2
            (set! (-> s5-0 current-process) arg0)
            (cond
              ((logtest? (-> arg0 mask) (process-mask pause))
@@ -1843,6 +1844,7 @@
                )
              (when (= (-> arg0 status) 'dead)
                (set! (-> s5-0 current-process) #f)
+               (profiler-end-event)
                (return 'dead)
                )
              )
@@ -1856,6 +1858,7 @@
            (cond
              ((= (-> arg0 status) 'dead)
               (set! (-> s5-0 current-process) #f)
+              (profiler-end-event)
               'dead
               )
              (else
@@ -1870,11 +1873,13 @@
                 ;;  (format 0 "Finished Post | Proc ~A | C1: ~X C2: ~X C3: ~X C4: ~X~%" (-> arg0 name) (-> *canary-1*) (-> *canary-2*) (-> *canary-3*) (-> *canary-4*))
                  (when (= (-> arg0 status) 'dead)
                    (set! (-> s5-0 current-process) #f)
+                   (profiler-end-event)
                    (return 'dead)
                    )
                  (set! (-> arg0 status) 'suspended)
                  )
                (set! (-> s5-0 current-process) #f)
+               (profiler-end-event)
                #f
                )
              )

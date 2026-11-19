@@ -626,8 +626,15 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
         ++g_bad_attrib_count;
         if (!g_logged_dead_attrib_buffer) {
           g_logged_dead_attrib_buffer = true;
-          std::fprintf(stderr, "[dkgl] draw skipped: attrib %u buffer %u dead/empty\n", i,
-                       a.buffer);
+          // FIX 139a (AI-assisted): the 2026-11-20 HW run skipped ~1 draw EVERY active
+          // frame this way (attrib counter 17774 over 50460 frames) and the old one-shot
+          // line named no culprit. Print the program + buffer state so the next run pins
+          // the draw family (buffer id alone was not enough to identify it).
+          std::fprintf(stderr,
+                       "[dkgl] draw skipped: attrib %u buffer %u dead/empty (program %s, "
+                       "stride %u, size %d type 0x%x, bo %d valid %d bytes %u)\n",
+                       i, a.buffer, table ? table->program_name : "?", a.stride, a.size,
+                       a.type, bo != nullptr, bo ? (int)bo->valid : -1, bo ? bo->bytes : 0);
         }
         return;  // attrib points at a dead/failed buffer: skip the draw
       }

@@ -44,6 +44,8 @@ DrawMode s_default_mode;
 DrawMode s_mode;
 uint32_t s_tbp = 0;
 LookupFn s_lookup = nullptr;
+bool s_logged_mode3 = false;  // FIX 142 probe: first rendermode-3 sprite dump is one-shot
+u64 s_mode3_total = 0;        // FIX 142 probe: cumulative rendermode-3 sprites since boot
 float s_near_fade_end = 0.f;  // #17: 0 = off (GL behaviour)
 AnimFn s_anim = nullptr;      // T125: PC_PORT imm-12 -> texture animator
 GlowFn s_glow = nullptr;      // T126: jak2 glow section -> GL GlowRenderer via dkgl
@@ -124,6 +126,30 @@ void do_block(uint16_t mode, uint32_t count, const SpriteVecData2d* vec, const A
       s_mode.set_clamp_t_enable(ag.clamp_data & 0b100);
     }
     mode_from_alpha(ag.alpha_data, s_mode);
+    // FIX 142 probe (AI-assisted): the PeaceMaker/Vulcan L2 electric ray (draw-beam,
+    // gun-util.gc) draws as 3D sparticles = rendermode 3. Count them and dump the first
+    // one -- placed AFTER the adgif state is applied so the mode fields are this
+    // sprite's, not the previous one's. The next HW run shows whether beam data reaches
+    // SpriteDk and with what texture/state (the 2026-11-20 run had no per-mode view).
+    if (mode == 3) {
+      s_stats.count_3d++;
+      s_mode3_total++;
+      if (!s_logged_mode3) {
+        s_logged_mode3 = true;
+        SpriteVecData2d vdp = vec[i];
+        switch_run_logf(
+            "[dk] sprite mode3 first: count %u tbp %u tex %u pos %.2f %.2f %.2f sx %.3f "
+            "quat %.3f %.3f %.3f sy %.3f rgba %d %d %d %d flag 0x%x matrix %d "
+            "mode 0x%08x dwrite %d zt %d ab %d aref %d clamp %d%d",
+            count, s_tbp, s_lookup ? s_lookup(s_tbp) : 0, vdp.xyz_sx.x(), vdp.xyz_sx.y(),
+            vdp.xyz_sx.z(), vdp.xyz_sx.w(), vdp.flag_rot_sy.x(), vdp.flag_rot_sy.y(),
+            vdp.flag_rot_sy.z(), vdp.flag_rot_sy.w(), (int)vdp.rgba.x() & 0xff,
+            (int)vdp.rgba.y() & 0xff, (int)vdp.rgba.z() & 0xff, (int)vdp.rgba.w() & 0xff,
+            vdp.flag(), vdp.matrix(), s_mode.as_int(), (int)s_mode.get_depth_write_enable(),
+            (int)s_mode.get_zt_enable(), (int)s_mode.get_ab_enable(), s_mode.get_aref(),
+            (int)s_mode.get_clamp_s_enable(), (int)s_mode.get_clamp_t_enable());
+      }
+    }
 
     if (s_verts.size() / 4 >= kMaxSprites) {
       s_stats.capped++;
@@ -558,6 +584,9 @@ const SpriteVertParams& captured_params() {
 const FrameDraws& frame_draws() {
   return s_frame;
 }
+u64 mode3_total() {
+  return s_mode3_total;  // FIX 142 probe: cumulative rendermode-3 sprites since boot
+}
 
 void build_frame() {
   s_frame = FrameDraws();
@@ -565,6 +594,7 @@ void build_frame() {
     return;
   }
   s_frame.sprites = (uint32_t)(s_verts.size() / 4);
+  s_frame.mode3 = s_stats.count_3d;  // FIX 142 probe
   s_build++;
   const uint32_t vbytes = (uint32_t)(s_verts.size() * sizeof(Vertex));
   const uint32_t ibytes = (uint32_t)(s_idx.size() * 4);

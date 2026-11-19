@@ -324,6 +324,7 @@ void uniform4fv(int location, int count, const float* v);  // T112 (DepthCue u_c
 // T111: Generic2's extra uniform calls + glBlendColor
 void uniform1ui(int location, u32 v);
 void uniform3f(int location, float x, float y, float z);
+void uniform2(int location, float x, float y);  // FIX 139a: FullScreenTexDraw tex_coord_0/1
 // T125 (AI-assisted): TextureAnimator (tex_anim) -- vec arrays + ivec4
 void uniform2fv(int location, int count, const float* v);
 void uniform3fv(int location, int count, const float* v);

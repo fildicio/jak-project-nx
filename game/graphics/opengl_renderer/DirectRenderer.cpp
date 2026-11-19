@@ -29,6 +29,10 @@ constexpr PerGameVersion<int> game_height(448, 416, 416, 416);
 #include "game/switch/boot_log.h"
 #include "game/switch/run_log.h"
 
+namespace dkgl {
+void note_sky_fold_draw();  // dkgl_frame.cpp, FIX 149: half-res sky menu detector
+}
+
 static void boot_log_dr(const char* msg) {
   switch_boot_log(msg);
 }
@@ -486,13 +490,19 @@ void DirectRenderer::flush_pending(SharedRenderState* render_state, ScopedProfil
     // as the PC path below (pass-B's), for any caller that skips its re-upload.
     // only the jak2 sky ("sky-draw", SKY_DRAW bucket) is known to sit at the far plane;
     // every other DirectRenderer keeps the exact two-pass path.
-    if (m_name == "sky-draw") {
+    // FIX 149 (AI-assisted): jak3's "sky" (SKY bucket) too. Its sky-tng.gc is the jak2
+    // code with the same GS states (clouds: atest GEQUAL aref 0x50 afail FB_ONLY, ztst
+    // GEQUAL; sun/moon: aref 0x70 afail RGB_ONLY) and it draws first after BLIT_START
+    // onto the cleared depth, so the argument above holds unchanged. Its menu backdrop
+    // (blit-menu-mode, atest ALWAYS) never double-draws and is untouched.
+    if (m_name == "sky-draw" || m_name == "sky") {
       while (offset < m_prim_buffer.vert_count) {
         glDepthMask(GL_TRUE);
         glUniform1f(m_uniforms.alpha_min, -10);
         glUniform1f(m_uniforms.alpha_max, 10);
         gfx::count_draw(n_batch);
         glDrawArrays(GL_TRIANGLES, first_vert + offset, n_batch);
+        dkgl::note_sky_fold_draw();
         offset += n_batch;
         draw_count++;
         num_tris += n_batch / 3;
@@ -673,6 +683,40 @@ void DirectRenderer::update_gl_texture(SharedRenderState* render_state, int unit
           "[nozb1tex] tbp=%u gl=%llu %s", state.texture_base_ptr, (unsigned long long)*tex,
           render_state->texture_pool->get_debug_texture_name_from_tbp(state.texture_base_ptr)
               .c_str());
+    }
+  }
+  // FIX 143 probe (AI-assisted): the pause-menu map page samples tbp 4032 (the
+  // ProgressRenderer minimap FBO re-published by move_existing_to_vram). Log every
+  // pairing change so one HW run shows which renderer draws the page, and whether the
+  // pool still points at PC-MAP or at whatever GOAL last loaded into slot 4032.
+  if (state.texture_base_ptr == 4032) {
+    static u64 s_last_map_tex = UINT64_MAX;
+    static u32 s_map_lines = 0;
+    if (*tex != s_last_map_tex && s_map_lines < 200) {
+      s_last_map_tex = *tex;
+      s_map_lines++;
+      switch_run_logf("[maptex] %s tbp=4032 gl=%llu %s", m_name.c_str(),
+                      (unsigned long long)*tex,
+                      render_state->texture_pool->get_debug_texture_name_from_tbp(4032).c_str());
+    }
+  }
+  // FIX 143 probe (AI-assisted): jak3 desert "kinda black" -- the sky bucket draws via
+  // this renderer. Log its texture pairings so a HW desert run shows whether the sky
+  // gradient resolves to a real texture (page name) or the placeholder (id 0/miss).
+  if (m_name == "sky") {
+    static u32 s_last_sky_tbp = UINT32_MAX;
+    static u64 s_last_sky_tex = UINT64_MAX;
+    static u32 s_sky_lines = 0;
+    if ((state.texture_base_ptr != s_last_sky_tbp || *tex != s_last_sky_tex) &&
+        s_sky_lines < 200) {
+      s_last_sky_tbp = state.texture_base_ptr;
+      s_last_sky_tex = *tex;
+      s_sky_lines++;
+      switch_run_logf("[skytex] tbp=%u gl=%llu %s", state.texture_base_ptr,
+                      (unsigned long long)*tex,
+                      render_state->texture_pool->get_debug_texture_name_from_tbp(
+                          state.texture_base_ptr)
+                          .c_str());
     }
   }
 #endif

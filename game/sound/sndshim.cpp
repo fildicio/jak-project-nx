@@ -1,5 +1,6 @@
 #include "sndshim.h"
 
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
@@ -15,6 +16,10 @@
 #include "989snd/player.h"
 
 std::unique_ptr<snd::Player> player;
+
+// FIX 140 probe (AI-assisted): plays whose falloff volume arrived as 0 (see
+// snd_PlaySoundByNameVolPanPMPB). Read + reset by the [aud] 10s line in player.cpp.
+std::atomic<u32> g_snd_vol0_plays{0};
 
 void snd_StartSoundSystem() {
   // FIX 45: reuse the existing Player instead of destroying and rebuilding it. The GOAL level
@@ -192,6 +197,16 @@ s32 snd_PlaySoundByNameVolPanPMPB(snd::BankHandle bank_handle,
                                   s32 pan,
                                   s32 pitch_mod,
                                   s32 pitch_bend) {
+  // FIX 140 probe (AI-assisted): every enemy ambience the overlord plays goes through
+  // here with the falloff volume already applied (ssound.cpp GetVolume -> this call).
+  // The 2026-11-20 logs showed whole enemy families (FLITTER/SPYDER/MANTIS) landing at
+  // appvol 0; if that is authentic distance falloff the counter climbs while the player
+  // is far from them, and stays low up close. Constant-high near a loud enemy means the
+  // falloff inputs (ear trans / fo_min-max / curve) are wrong and enemy sounds are
+  // silently muted -- the "sound sometimes broken" lead.
+  if (vol <= 0) {
+    g_snd_vol0_plays.fetch_add(1, std::memory_order_relaxed);
+  }
   if (player) {
     return player->PlaySoundByName(bank_handle, bank_name, sound_name, vol, pan, pitch_mod,
                                    pitch_bend);

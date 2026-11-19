@@ -212,6 +212,13 @@ GLint GLAPIENTRY dkgl_glGetUniformLocation(GLuint program, const GLchar* name) {
 }
 void GLAPIENTRY dkgl_glUniform1i(GLint location, GLint v) { uniform1i(location, v); }
 void GLAPIENTRY dkgl_glUniform1f(GLint location, GLfloat v) { uniform1f(location, v); }
+// FIX 139a (AI-assisted): FullScreenTexDraw sets simple_texture's tex_coord_0/1 with
+// glUniform2f; it was still a census no-op, so the FIX 138 zoom-blur composite sampled
+// a degenerate (0,0)-(0,0) rect (scattergun level-2 blast = black screen on HW,
+// 2026-11-20 run: gl-census #6 fired at the first zoom_blur).
+void GLAPIENTRY dkgl_glUniform2f(GLint location, GLfloat v0, GLfloat v1) {
+  uniform2(location, v0, v1);
+}
 void GLAPIENTRY dkgl_glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2,
                                  GLfloat v3) {
   uniform4f(location, v0, v1, v2, v3);
@@ -406,6 +413,8 @@ void install_glad() {
       reinterpret_cast<PFNGLUNIFORM1FPROC>(reinterpret_cast<void*>(&dkgl_glUniform1f));
   glad_glUniform4f =
       reinterpret_cast<PFNGLUNIFORM4FPROC>(reinterpret_cast<void*>(&dkgl_glUniform4f));
+  glad_glUniform2f =
+      reinterpret_cast<PFNGLUNIFORM2FPROC>(reinterpret_cast<void*>(&dkgl_glUniform2f));
   glad_glUniform2fv = reinterpret_cast<PFNGLUNIFORM2FVPROC>(
       reinterpret_cast<void*>(&dkgl_glUniform2fv));  // T125: tex_anim uvs[4]
   glad_glUniform3fv = reinterpret_cast<PFNGLUNIFORM3FVPROC>(

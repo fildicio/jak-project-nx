@@ -1,5 +1,7 @@
 #include "BlitDisplays.h"
 
+#include <cmath>
+
 #include "common/log/log.h"
 
 #include "game/graphics/opengl_renderer/Fbo.h"
@@ -74,9 +76,19 @@ void BlitDisplays::render(DmaFollower& dma,
           // copy buffer texture -> custom texture
           m_copier->copy_now(render_state->render_fb_w, render_state->render_fb_h,
                              render_state->render_fb);
-          m_gpu_tex->w = render_state->render_fb_w;
-          m_gpu_tex->h = render_state->render_fb_h;
           render_state->texture_pool->move_existing_to_vram(m_gpu_tex, m_tbp);
+          // FIX 141 (AI-assisted): re-link the tbp slot after the capture. The old
+          // manual m_gpu_tex->w/h assignment kept the record size fresh but left the
+          // slot's texture id pointing at the boot-time dk image: on dkgl the
+          // glTexImage2D resize inside copy_now respecifies the copier texture, which
+          // drops its materialized dktexgpu id and materializes a NEW image at the
+          // blit. GL texture names survive the resize; dkgl image ids do not, so the
+          // quads sampling this tbp (jak2 save-menu backdrop) drew the stale image =
+          // corrupted picture. update_gl_texture re-resolves the CURRENT id (via the
+          // T105 pool_id seam) and sets the record w/h -- the TextureAnimator pattern.
+          render_state->texture_pool->update_gl_texture(m_gpu_tex, render_state->render_fb_w,
+                                                        render_state->render_fb_h,
+                                                        (GLuint)m_copier->texture());
 
         } break;
         case 0x11: {
@@ -90,11 +102,11 @@ void BlitDisplays::render(DmaFollower& dma,
           // On PC, we set this flag which means that after rendering is finished we copy the saved
           // buffer back.
           m_copy_back_pending = true;
-          // FIX 138 probe (AI-assisted): log-only, one shot.
+          // FIX 138 probe (AI-assisted): log-only. FIX 148: budget 30 (menu-mode on/off timing).
           if (dkgl::g_dkgl_copyprobe) {
-            static bool s_logged = false;
-            if (!s_logged) {
-              s_logged = true;
+            static int s_budget = 30;
+            if (s_budget > 0) {
+              s_budget--;
 #if defined(__SWITCH__)
               switch_run_logf("[copyprobe] 0x11 copy_back pending (restore PC-BLIT at frame end)");
 #endif
@@ -126,11 +138,16 @@ void BlitDisplays::render(DmaFollower& dma,
         case 0x14: {
           m_color_filter_pending = true;
           memcpy(m_color_filter.data(), data.data, sizeof(math::Vector4f));
-          // FIX 138 probe (AI-assisted): log-only, one shot.
+          // FIX 138 probe (AI-assisted): log-only. FIX 148: log each change > 0.05 (budget 60)
+          // so the HW log shows the whole jak3 death tint / fade-back curve, not just frame 1.
           if (dkgl::g_dkgl_copyprobe) {
-            static bool s_logged = false;
-            if (!s_logged) {
-              s_logged = true;
+            static int s_budget = 60;
+            static math::Vector4f s_last(-1.f, -1.f, -1.f, -1.f);
+            const math::Vector4f d = m_color_filter - s_last;
+            if (s_budget > 0 && (std::abs(d.x()) > 0.05f || std::abs(d.y()) > 0.05f ||
+                                 std::abs(d.z()) > 0.05f)) {
+              s_budget--;
+              s_last = m_color_filter;
 #if defined(__SWITCH__)
               switch_run_logf("[copyprobe] 0x14 color_filter rgba %.2f %.2f %.2f %.2f",
                                m_color_filter.x(), m_color_filter.y(), m_color_filter.z(),
@@ -276,13 +293,10 @@ void BlitDisplays::do_zoom_blur(SharedRenderState* render_state, ScopedProfilerN
 }
 
 void BlitDisplays::do_slow_time(SharedRenderState* render_state, ScopedProfilerNode& prof) {
-  // FIX 50 (AI-assisted): do_zoom_blur may have already captured this exact frame
-  // earlier in the same call, and do_copy_back can run both. Re-capturing blits the
-  // whole framebuffer again and - worse on Tegra - forces another pipeline flush.
-  if (!m_blur_new_copier.holds(render_state->render_fb_w, render_state->render_fb_h)) {
-    m_blur_new_copier.copy_now(render_state->render_fb_w, render_state->render_fb_h,
-                               render_state->render_fb);
-  }
+  // FIX 147 (AI-assisted): always capture. The FIX 50 holds() dedupe never expired, so
+  // after the first capture every later frame reused that one stale image.
+  m_blur_new_copier.copy_now(render_state->render_fb_w, render_state->render_fb_h,
+                             render_state->render_fb);
 
   // clear screen
   glBindFramebuffer(GL_FRAMEBUFFER, render_state->render_fb);
@@ -317,17 +331,22 @@ void BlitDisplays::apply_color_filter(SharedRenderState* render_state, ScopedPro
     // if the multiplier is >1, the only way I see to do this is copy and redraw the whole screen.
     // doing the fullscreen draw also seems to cause alpha-related issues - the debug menu
     // background stops showing up.
-    // FIX 50 (AI-assisted): same dedupe as do_slow_time - if this frame is already
-    // captured, a second full-framebuffer blit (and its Tegra pipeline flush) is
-    // pure waste. The colour filter only reads the capture.
-    if (!m_blur_new_copier.holds(render_state->render_fb_w, render_state->render_fb_h)) {
-      m_blur_new_copier.copy_now(render_state->render_fb_w, render_state->render_fb_h,
-                                 render_state->render_fb);
+    // FIX 147 (AI-assisted): the FIX 50 holds() dedupe never expired, so the filter
+    // redrew the FIRST captured frame forever: jak3's resetter tint (1.25 .875 .25) at a
+    // death froze the screen (black on Switch). Always capture this frame. A filter
+    // within 1/255 of white is invisible in 8-bit colour, so skip its full-screen copy
+    // (the resetter's fade-back can stop just short of exactly 1.0).
+    m_color_filter_pending = false;
+    const auto near_one = [](float v) { return std::abs(v - 1.f) < (1.f / 255.f); };
+    if (near_one(m_color_filter.x()) && near_one(m_color_filter.y()) &&
+        near_one(m_color_filter.z())) {
+      return;
     }
+    m_blur_new_copier.copy_now(render_state->render_fb_w, render_state->render_fb_h,
+                               render_state->render_fb);
     glDisable(GL_DEPTH_TEST);
     glBindTexture(GL_TEXTURE_2D, m_blur_new_copier.texture());
     m_fullscreen_tex_draw.draw(m_color_filter, math::Vector2f{0, 0}, math::Vector2f{1, 1},
                                render_state, prof);
-    m_color_filter_pending = false;
   }
 }

@@ -25,7 +25,8 @@
      )
   )
 
-(defmacro with-profiler (category profile-color &rest body)
+(defmacro with-profiler-ps2-only (category profile-color &rest body)
+  "The original debug-segment profiler bar only (no pc-prof event)."
   `(begin
      (when *debug-segment*
        (let ((prof (-> *display* frames (-> *display* on-screen) profile-array data 0))
@@ -52,6 +53,18 @@
        )
      ,@body
      (end-profiler)
+     )
+  )
+
+;; og:preserve-this FIX 150 (AI-assisted): also emit a pc-prof event named after the category,
+;; so the Switch GOAL profiler (kmachine goal_prof_event, gk_goalprof.txt) can attribute the
+;; game thread's frame time. Do not use it around (suspend): the kernel runs other processes
+;; in between and the begin/end pair would no longer nest -- use with-profiler-ps2-only.
+(defmacro with-profiler (category profile-color &rest body)
+  `(begin
+     (profiler-start-event ,(symbol->string (cadr category)))
+     (with-profiler-ps2-only ,category ,profile-color ,@body)
+     (profiler-end-event)
      )
   )
 

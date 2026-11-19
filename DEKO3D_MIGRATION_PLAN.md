@@ -359,7 +359,7 @@ stop and write a notes entry before spending more (the FIX 109 lesson).
   is 1020 MHz). Record the exact CPU/GPU clocks in every capture from now on, and do one
   extra pass at **stock clocks**: at 1020 MHz the CPU-bound render phase (30–36 ms,
   ~linear in clock) becomes ~40–48 ms, i.e. **jak2/jak3 miss 30 fps on a stock console
-  today** — that number is the plan's headline justification, and every deko3d A/B must be
+  today** — that number is the plan's headline justification, and every deko3d A/B must beed
   same-clocks vs this baseline.
 - **P0.2** Generate the GL inventory as a committed artifact: script
   `scripts/gen-gl-inventory.py` listing per-file GL call counts (today: 2,261/40) and every

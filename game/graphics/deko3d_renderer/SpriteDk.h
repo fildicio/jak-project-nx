@@ -173,6 +173,7 @@ struct FrameDraws {
   uint32_t vert_bytes = 0;
   uint64_t params_gpu = 0;
   uint32_t sprites = 0;   // quads built
+  uint32_t mode3 = 0;     // quads with rendermode 3 (3D sparticles: beams/arcs) this frame
   uint32_t no_tex = 0;    // batches whose VRAM address had no texture (skipped)
   uint32_t dropped = 0;   // GPU ring full / sprite cap
 };
@@ -184,6 +185,7 @@ struct CaptureStats {
   uint32_t direct = 0;       // pre-sprite direct transfers (not drawn yet)
   uint32_t distort = 0;      // distort sprites (not drawn yet)
   uint32_t count_2d = 0;     // group 0 sprites (2D + 3D)
+  uint32_t count_3d = 0;     // group 0 sprites with rendermode 3 (beam/arc 3D sparticles)
   uint32_t count_hud = 0;    // group 1 sprites
   uint32_t capped = 0;       // sprites over the per-frame cap
 };
@@ -242,6 +244,7 @@ const SpriteVertParams& captured_params();
 // Render thread, before present: copies the capture into a GPU ring slot.
 void build_frame();
 const FrameDraws& frame_draws();
+u64 mode3_total();  // FIX 142 probe: cumulative rendermode-3 sprites since boot
 
 // #17 (AI-assisted): world 2D sprites fade out as their screen box grows towards
 // screen_frac_end (1 = the whole screen) and are skipped beyond it. 0 = off (GL behaviour).

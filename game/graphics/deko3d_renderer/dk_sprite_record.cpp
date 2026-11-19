@@ -117,9 +117,10 @@ void record_world(int fb_w, int fb_h) {
   s_frames++;
   if (s_frames == 1 || s_frames % 600 == 0) {
     switch_run_logf("[dk] sprite frame %llu: sprites=%u draws=%u/%u no_tex=%u dropped=%u "
-                    "misses=%u early_z=%u",
+                    "misses=%u early_z=%u mode3=%u/%llu",
                     (unsigned long long)s_frames, f.sprites, draws, (unsigned)f.draws.size(),
-                    f.no_tex, f.dropped, s_misses, s_early_draws);
+                    f.no_tex, f.dropped, s_misses, s_early_draws, f.mode3,
+                    (unsigned long long)mode3_total());
   }
 }
 

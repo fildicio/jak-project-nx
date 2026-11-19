@@ -13,6 +13,14 @@
 // (no "[dk] hfrag level" line in gk_run_log.txt), so the CPU half now counts
 // every early-out (diag(), "[dk] hfrag cap" line) and the once-silent
 // get_tfrag3_level miss is counted and named.
+//
+// FIX 145 (AI-assisted): the walk had ONE extra positional read vs GL's
+// Hfrag::render (it ate the CNT/25 PC_PORT packet), so no hardware run ever
+// captured a packet -- and its blind reads ASSERT-exited the game
+// ('tag.addr == 0', dma_chain_read.h:68) on the first death-in-water chain
+// rebuild (2026-11-20 run, 66.5 s). The walk now matches GL's read order
+// exactly, and every read peeks the tag first (tag_reads_safely, bad_tag diag)
+// so a mid-frame chain rebuild can never kill the game.
 #if defined(__SWITCH__) || defined(DK_HOST_REPLAY)
 #include <algorithm>
 #include <array>
@@ -91,8 +99,9 @@ constexpr uint32_t kTexImages = 4096;  // FIX 119: matches dkdev kMaxTexImages (
 constexpr uint32_t kIndsPerBucket = kIndsPerTile * kNumTiles;
 
 // ---- capture: the bucket's TfragPcPortData packets ---------------------------
-// Same reads as GL Hfrag::render: bucket NEXT, init nop, FLUSHA+DIRECT setup,
-// nop, then one PC_PORT packet per active level, nop, ending.
+// Same reads as GL Hfrag::render, in the same order (FIX 145): bucket head (GL
+// nop1) + empty check, FLUSHA+DIRECT setup, one nop (a NEXT hop on gen-2), then
+// the packet loop -- on the real jak3 chains the PC_PORT packet is loop read #1.
 struct CapLev {
   bool valid = false;
   TfragPcPortData pc;
@@ -109,6 +118,85 @@ int s_no_level_names = 0;
 bool is_dma_nop(const DmaTransfer& xfer) {
   return xfer.size_bytes == 0 && xfer.vifcode0().kind == VifCode::Kind::NOP &&
          xfer.vifcode1().kind == VifCode::Kind::NOP;
+}
+
+// GL Hfrag.cpp is_dma_init_nop: same, but vifcode0 may also be a MARK.
+bool is_dma_init_nop(const DmaTransfer& xfer) {
+  return xfer.size_bytes == 0 &&
+         (xfer.vifcode0().kind == VifCode::Kind::NOP ||
+          xfer.vifcode0().kind == VifCode::Kind::MARK) &&
+         xfer.vifcode1().kind == VifCode::Kind::NOP;
+}
+
+// FIX 145 (AI-assisted): the 2026-11-20 hardware run (jak3, FIX 144 probes) ended
+// with "[ASSERT] 'tag.addr == 0' at dma_chain_read.h:68" + _exit(1) the moment the
+// player died in the water -- a death/warp rebuilds the bucket chain while this
+// positional walk is reading it, and DmaFollower::read_and_advance() ASSERTs on
+// CNT tags with a nonzero addr (and on spr) when a read lands on non-tag data.
+// Real GOAL chains can contain those; PC never notices because its walk is aligned
+// (see capture_chain). Every hfrag read now peeks the tag first and bails out
+// counted (s_diag.bad_tag) instead of killing the game.
+bool tag_reads_safely(const DmaFollower& b) {
+  if (b.ended()) {
+    return false;
+  }
+  const DmaTag tag = b.current_tag();
+  if (tag.spr) {
+    return false;
+  }
+  return !(tag.kind == DmaTag::Kind::CNT && tag.addr != 0);
+}
+
+// FIX 144 (AI-assisted): raw dump of the bucket-8 slot, printed whenever its SHAPE
+// CHANGES (first chains of a boot dump the menu-time shape -- usually the empty
+// trampoline -- then the desert's real shape prints when it appears). Every hardware
+// run so far captured ZERO hfrag packets and the FIX-117 diag line only printed after
+// a successful capture, so which early-out fired (head CALL / empty / walk-break) was
+// invisible. Reading:
+//   - head NEXT then CALL   = empty-bucket trampoline -- GOAL sent no hfrag data
+//     (pc-draw-hfrags / pc-should-draw-hfrag side; the renderer port is not the culprit);
+//   - CNT/25 + vif1 PC_PORT = the packets ARE there and the walk should have worked --
+//     the walk's own assumptions are wrong, and these lines name the exact shape;
+//   - anything else          = a bucket shape the port never accounted for.
+// Reads are bounded (8 tags) and land inside bucket 9's chain at worst, never off-buffer.
+bool s_first_pkt_logged = false;
+void dump_slot_on_change(const void* data, uint32_t slot, bool jak3_chain) {
+  DmaFollower d(data, slot);
+  // signature of the first 4 tags: kind (8 bit) + qwc (24 bit) each
+  uint64_t sig = 0;
+  {
+    DmaFollower s(data, slot);
+    for (int i = 0; i < 4; i++) {
+      if (!tag_reads_safely(s)) {  // FIX 145: never ASSERT-exit on a rebuilt chain
+        break;
+      }
+      const DmaTag tag = s.current_tag();
+      sig = sig * 1000003u + ((uint64_t)(int)tag.kind * 16777216u + tag.qwc);
+      s.read_and_advance();
+    }
+  }
+  static uint64_t s_last_sig = ~0ull;
+  static int s_prints = 0;
+  if (sig == s_last_sig || s_prints >= 12) {
+    return;
+  }
+  s_last_sig = sig;
+  s_prints++;
+  switch_run_logf("[dk] hfrag b8 raw dump #%d (jak3-chain=%d):", s_prints, jak3_chain ? 1 : 0);
+  for (int i = 0; i < 8; i++) {
+    if (!tag_reads_safely(d)) {  // FIX 145: printing is safe, advancing is not
+      switch_run_logf("[dk] hfrag b8 tag%d: off=%u -- unsafe tag (spr/CNT-addr), dump stops",
+                      i, d.current_tag_offset());
+      break;
+    }
+    const DmaTag tag = d.current_tag();
+    const VifCode v0 = d.current_tag_vifcode0();
+    const VifCode v1 = d.current_tag_vifcode1();
+    switch_run_logf("[dk] hfrag b8 tag%d: off=%u kind=%d qwc=%u vif0=%d imm=%u vif1=%d imm=%u",
+                    i, d.current_tag_offset(), (int)tag.kind, tag.qwc, (int)v0.kind, v0.immediate,
+                    (int)v1.kind, v1.immediate);
+    d.read_and_advance();
+  }
 }
 
 }  // namespace
@@ -143,28 +231,69 @@ void capture_chain(const void* data, uint32_t start_offset) {
   }
   const uint32_t slot = buckets_base + 16 * kHfragBucketJak1;
   const uint32_t next = slot + 16;
+  dump_slot_on_change(data, slot, s_jak3_chain);  // FIX 144: dump on shape change, max 12
   DmaFollower b(data, slot);
-  b.read_and_advance();  // the bucket's own NEXT (size 0)
+  // FIX 145 (AI-assisted): read order now matches GL Hfrag::render EXACTLY -- the
+  // 2026-11-20 hardware run proved the real jak3 bucket-8 shape is
+  //   [slot head NEXT] -> CNT/10 FLUSHA+DIRECT -> NEXT hop (reads as a nop) ->
+  //   CNT/25 vif1=PC_PORT packet -> NEXT hop -> CNT/10 ending init -> NEXT hop ->
+  //   back to slot+16,
+  // so the packet is LOOP READ #1, and the CNT/10 ending init + its hop are the
+  // GL "ending" block (Hfrag.cpp:118-128). The old walk had one extra positional
+  // read ("first nop") that ate the packet and then broke on the NEXT hop -- zero
+  // packets captured on EVERY hardware run. Every read peeks the tag first
+  // (tag_reads_safely) so a death/warp chain rebuild cannot ASSERT-exit the game.
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  auto nop1 = b.read_and_advance();  // the bucket's own head (GL nop1: NEXT to data, or the empty nop)
   if (b.current_tag().kind == DmaTag::Kind::CALL) {
     s_diag.head_call++;
-    return;  // renderer didn't run this frame
+    return;  // renderer didn't run this frame (jak1 empty-bucket trampoline)
   }
-  b.read_and_advance();  // init nop (GL is_dma_init_nop)
+  // GL (Hfrag.cpp:66) asserts is_dma_init_nop on nop1 -- the slot tag itself --
+  // before anything else. If this fails the chain is not a bucket head at all.
+  if (!is_dma_init_nop(nop1)) {
+    s_diag.walk_break++;
+    return;  // unexpected head shape -- the FIX-144 dump names it
+  }
   if (b.current_tag_offset() == next) {
     s_diag.empty++;
-    return;  // empty bucket
+    return;  // empty bucket: the head was a size-0 nop, we are at slot+16
   }
-  b.read_and_advance();  // FLUSHA + DIRECT bucket setup (10 * 16)
-  b.read_and_advance();  // first nop
-  int guard = 0;
-  while (b.current_tag_offset() != next && ++guard < 64) {
-    auto xfer = b.read_and_advance();
-    if (is_dma_nop(xfer)) {
-      break;  // ending
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  {  // GL default_init: always FLUSHA + DIRECT, 10 * 16 bytes (160 B)
+    auto default_init = b.read_and_advance();
+    if (default_init.size_bytes != 10 * 16 ||
+        default_init.vifcode0().kind != VifCode::Kind::FLUSHA ||
+        default_init.vifcode1().kind != VifCode::Kind::DIRECT) {
+      s_diag.walk_break++;
+      return;  // not the expected bucket setup -- the FIX-144 dump names it
     }
-    if (xfer.size_bytes != sizeof(TfragPcPortData)) {
+  }
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  b.read_and_advance();  // the nop after the setup (a NEXT hop on gen-2 chains)
+  // GL packet loop (Hfrag.cpp:85-115): a nop read ends the loop, anything else must
+  // be a TfragPcPortData packet. FIX 145: the post-packet read used to be unguarded
+  // -- on a chain rebuilt mid-walk it could still ASSERT-exit (the crash class this
+  // fix exists to remove), so every read peeks the tag first.
+  int guard = 0;
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  auto xfer = b.read_and_advance();
+  while (!is_dma_nop(xfer)) {
+    if (xfer.size_bytes != sizeof(TfragPcPortData) || ++guard >= 64) {
       s_diag.walk_break++;  // unexpected -- keep whatever we got
-      break;
+      return;
     }
     if (s_ncap < kMaxLevels) {
       memcpy(&s_cap[s_ncap].pc, xfer.data, sizeof(TfragPcPortData));
@@ -172,6 +301,54 @@ void capture_chain(const void* data, uint32_t start_offset) {
       s_cap[s_ncap].valid = true;
       s_ncap++;
       s_diag.packets++;
+      if (!s_first_pkt_logged) {  // FIX 144: instant positive confirmation on HW
+        s_first_pkt_logged = true;
+        // FIX 145: s_ncap was already incremented above -- log the slot we
+        // actually wrote, not the next (uninitialized) one.
+        switch_run_logf("[dk] hfrag first pkt: level '%s' imm=%u",
+                        s_cap[s_ncap - 1].pc.level_name, xfer.vifcode1().immediate);
+      }
+    }
+    if (b.current_tag_offset() == next || b.ended()) {
+      return;  // chain ends right after the packet -- no ending block to read
+    }
+    if (!tag_reads_safely(b)) {
+      s_diag.bad_tag++;  // FIX 145: refused instead of ASSERT-exiting
+      return;
+    }
+    xfer = b.read_and_advance();
+  }
+  // GL ending (Hfrag.cpp:118-128): the second FLUSHA+DIRECT init + the end nop,
+  // then the follower sits on `next` (slot+16). The FIX-144 raw dump #3 shows the
+  // real desert shape (head NEXT, init, hop, pkt, hop, ending init, hop, end) --
+  // without these reads the walk would count a walk_break every desert frame.
+  if (b.current_tag_offset() == next || b.ended()) {
+    return;  // already at the next bucket (no ending block on this chain)
+  }
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  {
+    auto end_init = b.read_and_advance();
+    if (end_init.size_bytes != 10 * 16 ||
+        end_init.vifcode0().kind != VifCode::Kind::FLUSHA ||
+        end_init.vifcode1().kind != VifCode::Kind::DIRECT) {
+      s_diag.walk_break++;  // not the expected ending -- the FIX-144 dump names it
+      return;
+    }
+  }
+  if (b.current_tag_offset() == next || b.ended()) {
+    return;
+  }
+  if (!tag_reads_safely(b)) {
+    s_diag.bad_tag++;
+    return;
+  }
+  {
+    auto end_nop = b.read_and_advance();
+    if (!is_dma_nop(end_nop)) {
+      s_diag.walk_break++;
     }
   }
 }
@@ -350,23 +527,32 @@ void build_frame(Loader* loader) {
   for (auto& Lv : s_lev) {
     Lv.cam_valid = false;
   }
+  // FIX 144 (AI-assisted): count and report EVERY build call, including the ones that
+  // captured nothing. T113/FIX 117 printed this summary only after `s_ncap != 0`, so the
+  // real hardware failure -- bucket 8 has never yielded a packet on any run (jak1 and
+  // jak3 alike; the jak3 desert ground / hfrag terrain never drew a pixel) -- returned
+  // at the `s_ncap == 0` early-out BEFORE the diag line could fire. cap0 counts the
+  // empty builds so one run log now names the failure mode instead of printing nothing.
+  s_build++;
+  if (s_ncap == 0) {
+    s_diag.no_data++;
+  }
+  if (s_build == 1 || s_build % 600 == 0) {
+    switch_run_logf(
+        "[dk] hfrag cap %llu | pkts %llu head-call %llu empty %llu break %llu bad-tag %llu | "
+        "no-level %llu load-fail %llu ok %llu | cap0 %llu",
+        (unsigned long long)s_build, (unsigned long long)s_diag.packets,
+        (unsigned long long)s_diag.head_call, (unsigned long long)s_diag.empty,
+        (unsigned long long)s_diag.walk_break, (unsigned long long)s_diag.bad_tag,
+        (unsigned long long)s_diag.no_level,
+        (unsigned long long)s_diag.load_fail, (unsigned long long)s_diag.level_ok,
+        (unsigned long long)s_diag.no_data);
+  }
   if (DKHF_NEED_LOADER && loader == nullptr) {
     return;
   }
   if (s_ncap == 0) {
     return;
-  }
-  s_build++;
-  // FIX 117: one summary line per 600 builds (~10 s at 60 fps) covering every
-  // early-out that used to be silent (see diag()).
-  if (s_build == 1 || s_build % 600 == 0) {
-    switch_run_logf(
-        "[dk] hfrag cap %llu | pkts %llu head-call %llu empty %llu break %llu | "
-        "no-level %llu load-fail %llu ok %llu",
-        (unsigned long long)s_build, (unsigned long long)s_diag.packets,
-        (unsigned long long)s_diag.head_call, (unsigned long long)s_diag.empty,
-        (unsigned long long)s_diag.walk_break, (unsigned long long)s_diag.no_level,
-        (unsigned long long)s_diag.load_fail, (unsigned long long)s_diag.level_ok);
   }
   for (uint32_t c = 0; c < s_ncap; c++) {
     std::string name = s_cap[c].pc.level_name;

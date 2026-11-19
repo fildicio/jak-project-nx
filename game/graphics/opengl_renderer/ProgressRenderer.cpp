@@ -1,5 +1,11 @@
 #include "ProgressRenderer.h"
 
+#if defined(__SWITCH__)
+// FIX 143 probe: run_log.h cannot be included next to the GL headers (u128 collision),
+// same forward declaration TexturePool.cpp uses.
+void switch_run_logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
+
 ProgressRenderer::ProgressRenderer(const std::string& name, int my_id, int batch_size)
     : DirectRenderer(name, my_id, batch_size),
       m_minimap_fb(kMinimapWidth, kMinimapHeight, GL_UNSIGNED_INT_8_8_8_8_REV) {}
@@ -46,6 +52,21 @@ void ProgressRenderer::handle_frame(u64 val,
         // one that we assume will get written to now.
         render_state->texture_pool->move_existing_to_vram(m_minimap_gpu_tex, kMinimapVramAddr);
         m_offscreen_mode = true;
+#if defined(__SWITCH__)
+        // FIX 143 probe (AI-assisted): the [pool] slot-4032 line logs every publish, but
+        // only when the source CHANGES -- a steady 126->408 flip republishes silently.
+        // This counter proves the off-screen branch still runs (and how often) even when
+        // the [pool] lines go quiet.
+        {
+          static u32 s_minimap_frames = 0;
+          static u32 s_minimap_logged = 0;
+          s_minimap_frames++;
+          if ((s_minimap_frames == 1 || s_minimap_frames % 600 == 0) && s_minimap_logged < 40) {
+            s_minimap_logged++;
+            switch_run_logf("[progress] minimap off-screen publish #%u", s_minimap_frames);
+          }
+        }
+#endif
         break;
       default:
         fmt::print("Unknown fbp in ProgressRenderer: {}\n", f.fbp());

@@ -1276,6 +1276,28 @@ std::unordered_map<std::string, GoalProfStat> g_goal_prof;
 std::vector<GoalProfFrame> g_goal_prof_stack;
 int g_goal_prof_frames = 0;
 std::chrono::steady_clock::time_point g_goal_prof_report = std::chrono::steady_clock::now();
+// FIX 151 (AI-assisted): EE wall vs EE CPU time per profiled frame. If CPU is well below
+// wall, the GOAL thread is losing its core (preempted / sharing with other threads), and
+// the "missing" ms land in whatever bracket was open -- typically the "display" self time.
+std::chrono::steady_clock::time_point g_goal_prof_last_top;
+unsigned long long g_goal_prof_last_cpu = 0;
+double g_goal_prof_wall_ms = 0, g_goal_prof_cpu_ms = 0, g_goal_prof_worst_gap = 0;
+// FIX 152 (AI-assisted): "display" self time split into the gaps between consecutive events
+// whose owner is the display process ("end:sound > end:display" = code between those two).
+std::unordered_map<std::string, double> g_goal_prof_gaps;
+std::string g_goal_prof_last_ev;
+std::chrono::steady_clock::time_point g_goal_prof_last_ev_t;
+void goal_prof_gap(const char* what, const std::string& name,
+                   std::chrono::steady_clock::time_point now) {
+  // owner of the gap = the frame on top of the stack between the two events
+  if (!g_goal_prof_stack.empty() && g_goal_prof_stack.back().name == "display" &&
+      !g_goal_prof_last_ev.empty()) {
+    g_goal_prof_gaps[g_goal_prof_last_ev + " > " + what + name] +=
+        std::chrono::duration<double, std::milli>(now - g_goal_prof_last_ev_t).count();
+  }
+  g_goal_prof_last_ev = std::string(what) + name;
+  g_goal_prof_last_ev_t = now;
+}
 
 void goal_prof_report() {
   auto now = std::chrono::steady_clock::now();
@@ -1294,6 +1316,18 @@ void goal_prof_report() {
     const double n = (double)g_goal_prof_frames;
     switch_run_logf("[goal] %d frames, %.2f ms/frame in %zu events -- worst self time:",
                     g_goal_prof_frames, total / n, v.size());
+    switch_run_logf("[goal] ee wall %.2f cpu %.2f ms/frame (off-core %.2f, worst frame gap %.2f)",
+                    g_goal_prof_wall_ms / n, g_goal_prof_cpu_ms / n,
+                    (g_goal_prof_wall_ms - g_goal_prof_cpu_ms) / n, g_goal_prof_worst_gap);
+    {
+      std::vector<std::pair<std::string, double>> gv(g_goal_prof_gaps.begin(),
+                                                     g_goal_prof_gaps.end());
+      std::sort(gv.begin(), gv.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+      for (size_t i = 0; i < gv.size() && i < 6; i++) {
+        switch_run_logf("[goal]   gap in display %-50.50s %6.2f ms/frame", gv[i].first.c_str(),
+                        gv[i].second / n);
+      }
+    }
     for (size_t i = 0; i < v.size() && i < 14; i++) {
       const auto& st = v[i].second;
       switch_run_logf("[goal]   %-28.28s self %6.2f incl %6.2f max %6.2f ms  x%.1f/frame",
@@ -1303,10 +1337,27 @@ void goal_prof_report() {
   }
   g_goal_prof.clear();
   g_goal_prof_frames = 0;
+  g_goal_prof_wall_ms = g_goal_prof_cpu_ms = g_goal_prof_worst_gap = 0;
+  g_goal_prof_gaps.clear();
+}
+
+// FIX 150 (AI-assisted): sdmc:/switch/<game>/gk_goalprof.txt turns the GOAL profile on
+// without R3+Minus (which also starts every other periodic diagnostic). Read once.
+bool goal_prof_flag() {
+  static int s_flag = -1;
+  if (s_flag < 0) {
+    FILE* f = fopen(SWITCH_LOG_PATH("gk_goalprof.txt"), "r");
+    s_flag = f ? 1 : 0;
+    if (f) {
+      fclose(f);
+      switch_run_logf("[goal] profiler on (gk_goalprof.txt)");
+    }
+  }
+  return s_flag == 1;
 }
 
 void goal_prof_event(const char* name, ProfNode::Kind kind) {
-  if (!switch_diag_enabled()) {
+  if (!switch_diag_enabled() && !goal_prof_flag()) {
     if (!g_goal_prof_stack.empty() || !g_goal_prof.empty()) {
       g_goal_prof_stack.clear();
       g_goal_prof.clear();
@@ -1327,11 +1378,13 @@ void goal_prof_event(const char* name, ProfNode::Kind kind) {
         if (k < key.size() && k > 0 && key[k - 1] == '-') {
           key.resize(k - 1);
         }
+        goal_prof_gap("begin:", key, now);
         g_goal_prof_stack.push_back({std::move(key), now, 0});
       }
       break;
     case ProfNode::END:
       if (!g_goal_prof_stack.empty()) {
+        goal_prof_gap("end:", g_goal_prof_stack.back().name, now);
         auto fr = std::move(g_goal_prof_stack.back());
         g_goal_prof_stack.pop_back();
         double incl = std::chrono::duration<double, std::milli>(now - fr.start).count();
@@ -1349,6 +1402,20 @@ void goal_prof_event(const char* name, ProfNode::Kind kind) {
       if (!strcmp(name, "ROOT")) {
         g_goal_prof_stack.clear();  // resync, as the desktop profiler does
       } else if (!strcmp(name, "display-loop-top")) {
+        goal_prof_gap("", "display-loop-top", now);
+        {
+          const unsigned long long cpu = switch_platform::switch_thread_cpu_ns();
+          if (g_goal_prof_last_cpu != 0) {
+            const double wall =
+                std::chrono::duration<double, std::milli>(now - g_goal_prof_last_top).count();
+            const double c = (double)(cpu - g_goal_prof_last_cpu) / 1e6;
+            g_goal_prof_wall_ms += wall;
+            g_goal_prof_cpu_ms += c;
+            g_goal_prof_worst_gap = std::max(g_goal_prof_worst_gap, wall - c);
+          }
+          g_goal_prof_last_cpu = cpu;
+          g_goal_prof_last_top = now;
+        }
         g_goal_prof_frames++;
         goal_prof_report();
       }

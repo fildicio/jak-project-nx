@@ -20,10 +20,16 @@
 // FIX 70 (AI-assisted): core pinning for cubeb's audio thread.
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <map>
 
 #include "game/switch/platform.h"
 #include "game/switch/run_log.h"
+
+// FIX 140 probe (AI-assisted): falloff-muted plays, counted in
+// snd_PlaySoundByNameVolPanPMPB (sndshim.cpp) on the overlord sound thread.
+// Defined at GLOBAL scope in sndshim.cpp -- must be declared before namespace snd.
+extern std::atomic<u32> g_snd_vol0_plays;
 #endif
 
 namespace snd {
@@ -43,6 +49,10 @@ std::map<std::pair<SoundBank*, u32>, std::array<int, 2>> s_aud_limited;
 // get dropped. Naming the sound needs a reverse lookup in the bank's (small) name table.
 int s_aud_instant = 0;
 std::map<std::pair<SoundBank*, u32>, int> s_aud_instant_map;
+// FIX 140 probe (AI-assisted): audio-callback arrivals more than 1.5x their nominal
+// period late (the output buffer starved in between -> the user hears a dropout).
+// Written only from the audio callback, read+reset by the [aud] 10s line.
+std::atomic<u32> s_aud_cb_late{0};
 const char* aud_sound_name(SoundBank* bank, u32 sound_id) {
   auto* block = dynamic_cast<SFXBlock*>(bank);
   if (block) {
@@ -94,6 +104,7 @@ void aud_report_top_instant() {
   }
 }
 }  // namespace
+
 #endif
 
 u8 g_global_excite = 0;
@@ -184,6 +195,23 @@ long Player::sound_callback([[maybe_unused]] cubeb_stream* stream,
   if (!s_audio_pinned.exchange(true)) {
     switch_platform::switch_pin_current_thread("audio", 2);
   }
+  // FIX 140 probe (AI-assisted): callback cadence. nframes at 48 kHz is the nominal
+  // period (~42.7 ms for 2048 samples); if the audio device waits 1.5x that between
+  // invocations the output buffer starved in between and the user hears a
+  // dropout/click -- the audible half of "sound sometimes broken". s_aud_cb_late is
+  // read+reset by the [aud] 10s line; this is its only writer.
+  {
+    static std::chrono::steady_clock::time_point s_last_cb{};
+    const auto now = std::chrono::steady_clock::now();
+    const auto last = s_last_cb;
+    s_last_cb = now;
+    if (last.time_since_epoch().count() != 0) {
+      const auto expect = std::chrono::microseconds(nframes * 1'000'000ll / 48000);
+      if (now - last > expect + expect / 2) {
+        s_aud_cb_late.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
 #endif
   ((Player*)user)->Tick((s16Output*)output_buffer, nframes);
   return nframes;
@@ -255,9 +283,18 @@ void Player::Tick(s16Output* stream, int samples) {
       static int s_secs = 0;
       if (++s_secs == 10) {
         s_secs = 0;
-        switch_run_logf("[aud] 10s plays %d nobank %d nohandler %d limit %d instant %d | live %d",
-                        s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit, s_aud_instant,
-                        (int)mHandlers.size());
+        // FIX 140 (AI-assisted): vol0 = plays the overlord sent with falloff volume 0
+        // (authentic distance falloff climbs it far from the source; constant-high next
+        // to a loud enemy = falloff-input bug, sounds silently muted), late = audio
+        // callbacks more than 1.5x their period apart (output starved -> audible
+        // dropout). Both name which half of "sound sometimes broken" is real.
+        switch_run_logf(
+            "[aud] 10s plays %d nobank %d nohandler %d limit %d instant %d | live %d "
+            "vol0 %u late %u",
+            s_aud_plays, s_aud_nobank, s_aud_nohandler, s_aud_limit, s_aud_instant,
+            (int)mHandlers.size(),
+            (unsigned)g_snd_vol0_plays.exchange(0, std::memory_order_relaxed),
+            (unsigned)s_aud_cb_late.exchange(0, std::memory_order_relaxed));
         aud_report_top(0, "rejected");
         aud_report_top(1, "cut-off");
         aud_report_top_instant();

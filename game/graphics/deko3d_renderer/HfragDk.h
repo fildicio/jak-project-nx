@@ -41,10 +41,20 @@ struct Diag {
   uint64_t head_call = 0;   // bucket 8 head was a CALL (renderer didn't run)
   uint64_t empty = 0;       // bucket ran but held no packets
   uint64_t walk_break = 0;  // packet loop stopped on an unexpected tag
+  // FIX 145 (AI-assisted): positional reads refused because the tag would trip
+  // DmaFollower's CNT-addr/spr ASSERTs. The 2026-11-20 hardware run self-exited
+  // ('tag.addr == 0', dma_chain_read.h:68) when a death-in-water rebuilt the
+  // bucket chain mid-walk; the hfrag walks now refuse those tags instead.
+  uint64_t bad_tag = 0;    // reads refused instead of ASSERT-exiting the game
   uint64_t packets = 0;     // TfragPcPortData packets captured
   uint64_t no_level = 0;    // level lookup miss (the name is logged once)
   uint64_t bad_data = 0, no_buffers = 0, load_fail = 0;  // load_level failures
   uint64_t level_ok = 0;    // levels resolved (loaded or reused) this run
+  // FIX 144 (AI-assisted): builds that captured NOTHING. T113/FIX 117 printed the summary
+  // only after `s_ncap != 0`, so the real hardware failure -- bucket 8 has never yielded a
+  // single packet on any run (jak1 AND jak3; the desert ground never drew) -- returned at
+  // the `s_ncap == 0` early-out before the diag line could fire. cap0 makes that visible.
+  uint64_t no_data = 0;      // build_frame calls with zero captured packets
   uint32_t vis_corners = 0, used_buckets = 0;  // last build (host replay asserts on these)
 };
 

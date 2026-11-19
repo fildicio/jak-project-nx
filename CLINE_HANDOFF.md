@@ -2903,3 +2903,122 @@ Builds: dk-lint PASS; check-switch.sh PASS — jak3 NRO `175ff978` (deployed, pr
 `dd0ff831` as .bak), jak2 NRO `00a61bad` (deployed, no copyback flag on jak2).
 Next run reads: the J14 checklist PLUS copyback/zoomblur counters during a light-jak
 transformation or a fast zoom, and the first-occurrence `[copyprobe]` params.
+
+## HW verdict 2026-11-20 (NRO `175ff978`, ~14 min, copyback ON) + FIX 139a — first user report triaged (AI-assisted)
+
+Report: (1) scattergun lvl-2 explosion -> BLACK SCREEN; (2) PeaceMaker lvl-2 electric
+ray invisible; (3) menu power-up map not rendering; (4) desert kinda black;
+(5) sound sometimes broken; (6) title-menu START artifacts; (7) perf check.
+Logs pulled to `/tmp/fix138-run` (card copies renamed `.fix138run`).
+
+Verdicts:
+- J14 checklist PASS: blit bad 0, notex 0, inert 85, eyes/texanim/glow all drawing,
+  no table-full. FIX 138 engaged: revblit 54 | copyback 54 zoomblur 114 slowtime 0
+  colorfilt 0. 0x11 armed at the menu START press (28.4s), 0x13 at the first
+  scattergun blast (58.5s, among shockwave/ring/redpuff sprtex).
+- (7) PERF FINE: 60.0 fps locked in gameplay (frame 16.67 ms, vsync-paced).
+- (1)+(6) ROOT CAUSE: `glUniform2f` was a glad census NO-OP (gl-census #6 fired at the
+  first zoom-blur). FullScreenTexDraw sets simple_texture tex_coord_0/1 with it -> the
+  zoom-blur composite sampled a degenerate (0,0)-(0,0) rect = one texel over the cleared
+  screen = BLACK. Latent dkgl gap that FIX 138 exposed (pre-138 the effect was absent,
+  with 138 it ran broken). The START transition arms 0x13 too (zoomblur 114 >> copyback
+  54), so the "menu artifacts" are plausibly the same composite.
+- FIX 139a (this session): `dkgl_glUniform2f` -> new `uniform2()` (8 B into the 16-B
+  std140 slot) + glad install; the one-shot dead-buffer skip line now prints
+  program/stride/buffer state — the run also skipped ~1 draw EVERY active frame for a
+  dead attrib buffer (17774 total, buffer id alone didn't identify it).
+- (2) PeaceMaker ray: drawn by `draw-beam` (gun-util.gc) -> 3D sparticles -> SpriteDk
+  mode 3, which the stats show drawing. If it was just hidden behind the black screen
+  it returns with 139a; if not, next ticket needs a 3D-sprite probe at the fire moment.
+- (3) menu map: minimap FBO HAS content in-game (map probe #5 at 38s: avg 123,137,141,170)
+  — the gap is the pause-menu map page (ProgressRenderer fbp 126 -> move_existing_to_vram
+  4032 -> menu draw). Needs a probe at the pause moment; not investigated yet.
+- (4) desert: geometry draws (gpu world 14-16 ms) but sky halfres 0 ALL run; levels visited
+  introcst/ctyslumc/desbst1. Sky/fog missing is the lead; needs a photo.
+- (5) audio: FLITTER flood (citymhf FLITTER_STEP/BUZZ/AMB): 10s plays 1131 limit 241
+  instant 676 — the documented instant-death retrigger storm starves the voice limit in
+  flitter scenes. Own ticket (sound handler, player.cpp FIX 122/123 forensics).
+
+Docs: JAK3_BRINGUP_TODO J16 row; DKGL_TODO row 15 updated.
+
+## Deploy state — 2026-11-20 (FIX 139a + 141 combined)
+- **jak2.nro md5 cc36fa4648e7f3d0f1eb4061df7dea62** (built by the parallel agent 00:42) — verified via `strings` to contain my FIX 139a probe marker + their FIX 141 (Warp.cpp/BlitDisplays.cpp `update_gl_texture` re-link after `copy_now`). Backups: `jak2.nro.bak-d099b19c` on card.
+- **jak3.nro md5 161fb93cee306f47f51bf6eece4d1d03** — rebuilt at their fix landing so jak3 carries 139a+141 too (earlier jak3 deploy 86304c3e was built 00:34, i.e. BEFORE FIX 141 edits 00:35 → superseded; kept on card as `jak3.nro.bak86304c3e-fix139a-only`).
+- `gk_dkgl_copyback.txt` stays ON for the retest (we WANT the 0x11/0x13 effects active).
+- Prior run logs on the card renamed `*.fix138run`.
+- HW retest priorities (both games): (1) scattergun L2 blast + title-START transition — expect zoom, not black; (2) Peacemaker lvl2 ray — if still invisible after 139a+141, add a 3D-sprite probe at the fire moment; (3) pause-menu map page; (4) jak2 save-menu warp backdrop (FIX 141's own target); (5) desert sky. The enriched dead-buffer skip line in the new logs will name the program of the ~1 draw/frame that gets skipped.
+
+## Deploy state — 2026-11-20 late night (FIX 142 + 143/140 probes)
+- The user ran the 139a+141 NRO (`161fb93c`) before sleeping: effects engaged (`zoomblur 562, copyback 24, blit bad 0`) but the **Vulcan/PeaceMaker lvl2 electric ray is still missing**, and the enriched skip line fired in `gk_stdout.txt`: `attrib 0 buffer 536871059 dead/empty (program sprite_distort, stride 20)`. **Root cause (FIX 142):** dkgl's `distort_dma` re-uploads its per-frame verts/indices with `GL_STATIC_DRAW`; `buffer_data()` pins STATIC+data into the 2 MB persistent ring, the verts are rebuilt every frame, so a few distort frames poisoned it and EVERY later distort pass died (`valid 0 bytes 0`) — the distorter never drew a pixel on HW. Fixed: `gl::DYNAMIC_DRAW` (new enum in dkgl_gl_enums.h) → per-frame data ring. The ray should now shimmer; a mode-3 sprite probe shipped alongside (`[dk] sprite mode3 first:` + `mode3=` on the `[dk] sprite frame` line) in case the beam's 3D-sparticle half needs its own ticket.
+- **FIX 143 (map page, probes only):** the run also revealed GOAL displacing VRAM slot 4032 mid-game (`[sprtex] … slot=4032 lasersmoke-31`) and the map probe disarming before gameplay (5 rounds x ~5 s, all EMPTY). Shipped: `[pool] slot 4032 <- pc %u/%u` on every source change, `[maptex] <renderer> tbp=4032 …` at the menu draw, `[progress] minimap off-screen publish #N`, map probe → 12 rounds x ~30 s with the pool's 4032 binding at each arm.
+- **Sky (probes):** jak3's sky bucket had no draw counter (the `sky halfres` counters are jak2-gated). `skydraw` added to the `[dkgl] stats` line + `[skytex]` texture-pairing lines from the sky renderer.
+- **FIX 140 (audio, probes):** `[aud] 10s … vol0 %u late %u` — vol0 = plays the overlord sent with falloff volume 0 (authentic distance vs a falloff-input bug muting enemies; the FLITTER/SPYDER/MANTIS storms all showed appvol 0), late = audio callbacks >1.5x their period (audible dropouts). Both are read+reset each window.
+- **Card:** `jak3.nro md5 56c6a2cfa5c6b88fa5f9ea544c7e9b2c` (backup `jak3.nro.bak161fb93c-fix139a141`), `jak2.nro md5 62dd8a611705dfa26fb290d2117f3ad4` (backup `jak2.nro.bakcc36fa46-fix139a141`). jak3's 139a+141 run logs rotated to `*.fix139a141run`; **`gk_dkgl_copyback.txt` created for jak2 as well** (it was absent — jak2's end-of-frame effects would never run without it; keep ON). All 8 probe marker strings verified in the jak3 NRO via `strings`. No `gk_dkgl_nodistort.txt` on either card dir (distort must stay enabled to see 142).
+- **HW retest when the user wakes (jak3 first):** (1) scattergun L2 + START — zoom visible (was FIXED by 139a, unchanged); (2) Vulcan lvl2 electric ray — EXPECTED FIXED by 142 (distort pass now draws); if still invisible, read `[dk] sprite mode3 first:` + `mode3=` to see if the beam's 3D sparticles even arrive; (3) pause-menu map page — read `[pool] slot 4032 <-` / `[maptex]` / `[progress]` timeline + the 30 s map probes for who owns slot 4032 at the menu moment; (4) desert — read `skydraw` (0 = sky bucket never draws; climbing + black = read `[skytex]` pairings) and take a photo; (5) stand NEXT to a flitter/spyder — read `vol0`/`late`: constant-high vol0 up close = falloff-input bug (muted enemies), late > 0 = real dropouts to chase. jak2: save-menu warp backdrop (141's target, now with copyback ON) + punch flash probes still pending a repro.
+- Builds ran sequentially (jak3 then jak2, both `check-switch.sh` PASS, dk-lint PASS). Commit checkpoint: FIX 136–139a still awaiting user approval; FIX 142/143/140-probe changes are stacked on top uncommitted too — coordinate with the parallel agent before committing anything (their FIX 141 is in the tree).
+
+## Deploy state — 2026-11-21 (FIX 144: desert ground = hfrag, never drew) — CURRENT
+
+**User follow-up: "i told u that the desert ground was looking black why didn't u fix it?"** Fair — the previous session read "desert kinda black" as a sky-bucket question and shipped counters + a photo request. The clarification (the GROUND, not the sky) pointed at terrain, and the dig found the actual bug:
+
+**Root cause (code + log archaeology, AI-assisted): the desert floor is HFRAG terrain — and the native hfrag pass has never captured a single packet on ANY hardware run, jak1 or jak3. It never drew a pixel.** Chain of evidence:
+- The desert level's ground textures are `wasintro-hfrag/wang_0..4` (512x256, loaded 8.4 s in the fix139a141 run) — hfrag is the height-fragment terrain system, a **jak3-only native pass** (`HfragDk`, bucket 8). dkgl deliberately doesn't take bucket 8 (census §2 G-gaps: "native HfragDk takes it, J3").
+- No `[dk] hfrag cap` line exists in ANY run log, ever. Not a single `[dk] hfrag level` line either. Meanwhile tfrag/tie/shrub captured and drew fine in the same frames (`[dk] tfrag frame 600: cams=3 tris=2676`, `[dk] tie frame 600: tris=56279`) — same chain buffer, same bucket-table convention, so the failure is inside the hfrag bucket walk itself.
+- **Why it was invisible:** FIX 117 put the diag summary AFTER the `s_ncap == 0` early-return in `build_frame` — the summary only printed once a packet existed. `s_ncap` was always 0, so the instrument designed to catch this exact failure never fired. The walk itself is a faithful port of GL `Hfrag::render`, bucket id verified on both sides (`jak3::BucketId::HFRAG == 8`, GOAL `vu1-user-h.gc (hfrag 8)`), and its empty-bucket mechanics are validated against a real recorded chain by `test_dk_hfrag_replay` — but it has NEVER seen a non-empty hfrag bucket on hardware, so the failure mode (empty CALL trampoline at slot 8 = GOAL sent no data, vs. shape mismatch = walk_break) could not be split statically. Do NOT trust "hfrag 8 covered" in the J13 audit — it conflated the dkgl table with the native pass.
+
+**FIX 144 (HfragDk.cpp/.h + dk_renderer.cpp, NRO-only):**
+- `[dk] hfrag cap %llu | … | cap0 %llu` now prints at build 1 + every 600 build CALLS **regardless of `s_ncap`**; `cap0`/`Diag::no_data` counts builds that captured nothing. One run log now names the failure mode instead of printing nothing.
+- `[dk] hfrag b8 raw dump #N` — first 8 raw tags at the bucket-8 slot (kind/qwc/vif cmds), printed whenever the slot's 4-tag signature CHANGES (max 12/run): the menu-time shape prints first, the desert's real shape prints the moment it appears. `head NEXT then CALL` = GOAL sent no hfrag data at all (pc-draw-hfrags / pc-should-draw-hfrag side); `CNT/25 + vif1 PC_PORT` = the packets are there and the walk's assumptions are wrong (exact bytes in hand); anything else = an unported bucket shape.
+- `[dk] hfrag first pkt: level '%s' imm=%u` one-shot — instant positive confirmation when the capture first works.
+- The R1 `gk_dkdump.txt` one-shot DMA chain dump (previously jak1-only) is armed for jak3; **`gk_dkdump.txt` = 4200 created on the card** (~70 s of in-level frames — mid-desert on the intro route). If the raw dump is inconclusive, the run drops a real `switch/jak3/dk_replay.dma` for offline host replay.
+
+**Card:** `jak3.nro md5 3455b421cb57d97067f55905dbe9eb4b` (backup `jak3.nro.bak56c6a2cf-fix142143` — note: the 56c6a2cf build was NEVER RUN, the user slept before testing it, so this NRO carries FIX 142+143+140-probes too), `jak2.nro md5 834b8a94776a9e5aeef40015c14e4eeb` (backup `jak2.nro.bak62dd8a61-fix142143`). Both `check-switch.sh` PASS (jak3 8 pre-existing warnings), dk-lint PASS, probe strings verified in the NRO via `strings`. No live run logs to rotate (the fix139a141 logs were the last ones). Flags: copyback ON (both games), `gk_dkdump.txt` 4200 (jak3), no nodistort flag.
+
+**HW retest reading order (jak3, one run covers everything):**
+1. PeaceMaker/Vulcan L2 ray — expected FIXED by FIX 142; if still invisible read `[dk] sprite mode3 first:` / `mode3=`.
+2. Pause-menu map — `[pool] slot 4032 <-`, `[maptex]`, `[progress]` + the 12×30 s map probes.
+3. **Desert (NEW — the ground):** read `[dk] hfrag cap … cap0` — pkts > 0 = the capture works now (then read `[dk] hfrag frame` for draws/corners and take a ground photo); cap0 climbing = still nothing, then read the `[dk] hfrag b8 raw dump #N` block at the desert timestamp (CALL = GOAL-side problem, CNT/25+PC_PORT = walk bug with exact bytes), and check `[dk] replay dump:` fired in the desert (if the timestamp is too early, raise the number in `gk_dkdump.txt` and rerun).
+4. Sky: `skydraw` + `[skytex]` + photo.
+5. Audio: stand next to a flitter/spyder, read `vol0`/`late`.
+6. jak2: save-menu warp backdrop repro (copyback now ON), punch-flash probes.
+
+**Uncommitted set grows:** FIX 144 stacks on 136–143 (still awaiting user approval; FIX 141 belongs to the parallel agent — coordinate before committing).
+
+## 2026-11-20 run verdict (FIX 142/143/144 build, md5 3455b421) — and FIX 145
+
+The user ran the deployed build in the desert. Results, in reading order:
+
+1. **PeaceMaker/Vulcan L2 ray: data reaches the sprite pass.** `[dk] sprite mode3 first:` fired at 54.3 s (count 48, tbp 25, full adgif state) and the frame counter shows `mode3=0/13440` (that-frame/cumulative) — 3D beam sparticles ARE drawn through the regular sprite path. Visual confirmation (ray shimmers on screen) is a photo question for the user, but no code ticket remains unless it still looks wrong.
+2. **Pause-menu map: publishing and drawing.** `[pool] slot 4032 <- pc 3421/3` (plus 3421/4, /5), `[progress] minimap off-screen publish #1`, `[maptex] hud-draw-hud-alpha tbp=4032 gl=1567 PC-MAP/map` — all at 50.9 s. The map path is live end-to-end; any remaining blank-map is a visual question.
+3. **Ocean/sky/audio clean:** `blit bad 0`, `revblit 6`, `copyback 6`, `skydraw 17620`, `eye draws 17368`, `texanim/glow/distort` all flowing, `notex 0`, `dma mismatch 0`. `[aud]` windows show the known broken-sound top-lists (SNAKE_KNOBBY etc.) — the FIX 140 probes are doing their job.
+4. **THE RUN CRASHED at 66.5 s:** `[ASSERT] 'tag.addr == 0' at dma_chain_read.h:68` right after splash sprites (`level-default-sprite/splash`) — the player died in the water, the death/warp rebuilt the bucket chain mid-walk, and the hfrag positional walk read a non-tag as a CNT tag → `_exit(1)`. gk_fatal.txt empty (clean exit, not a crash dump).
+5. **hfrag: the packets were ALWAYS there.** The FIX-144 raw dump caught the real desert shape: `head NEXT -> CNT/10 FLUSHA+DIRECT -> NEXT hop -> CNT/25 vif1=PC_PORT (the packet) -> NEXT hop -> CNT/10 ending init -> NEXT hop -> back to slot+16`. `pkts 0 / break 333` on every prior run was the walk's own bug, exactly the "walk's assumptions are wrong" case from the FIX-144 legend.
+
+**FIX 145 (HfragDk.cpp/.h, NRO-only) — finished in this session:**
+- The old walk had ONE extra positional read (a "first nop") vs GL `Hfrag::render` — it ate the CNT/25 PC_PORT packet, so no hardware run ever captured one (the desert ground never drew). The walk now matches GL's read order exactly: head nop, empty check, FLUSHA+DIRECT init, first nop, GL packet loop (`while (!is_dma_nop)`, packet = loop read #1), then GL's ending block (`Hfrag.cpp:118-128`: second FLUSHA+DIRECT init + end nop) — the raw dump's tag5/tag6, without which the walk counted a `walk_break` every desert frame.
+- **Crash fix:** every `read_and_advance` in the walk is now guarded by `tag_reads_safely` (peek the tag first; refuse CNT-with-addr/spr/ended instead of ASSERT-exiting). The previous session's draft had the post-packet read unguarded — that was the exact crash class; this session guarded it and added the ending block.
+- New diag `Diag::bad_tag` (reads refused instead of killing the game) on the `[dk] hfrag cap` line. `dump_slot_on_change` reads are guarded too.
+- Validated: dk-lint PASS; host `HfragReplay` test PASS (jak1 empty-chain path unchanged); both docker builds PASS.
+
+**Card:** `jak3.nro md5 632aeeb88e562744d71a4e9139a902ae` (backup `jak3.nro.bak3455b421-fix142-144` — that NRO was the one the user ran), `jak2.nro md5 877e291c39b134f611749350804c2c09` (backup `jak2.nro.bak834b8a94-fix142143`). Nov-20 logs preserved on card as `*.fix142run` (also in `/tmp/fix142run/`). Flags unchanged: copyback ON (both), `gk_dkdump.txt` 4200 (jak3). fr3 trees unchanged (no asset change).
+
+**HW retest reading order (jak3):** (1) survive a death-in-water — no `[ASSERT]` at the end of the log; a few `bad_tag` on the `[dk] hfrag cap` line are expected and harmless around the warp. (2) **Desert ground should now DRAW** — expect `[dk] hfrag first pkt: level '...'` within seconds of entering the desert, `pkts > 0`, `break` flat after the first frame, then `[dk] hfrag frame` for corners/draws + a ground photo. (3) Peacemaker ray photo + map photo (data confirmed live; both are look-checks now). (4) If `[dk] replay dump:` fired, `dk_replay.dma` lands on the card for offline host replay of the real chain.
+
+**Uncommitted:** FIX 145 stacks on 136–144 (awaiting user approval; FIX 141 belongs to the parallel agent — coordinate before committing).
+
+
+## 2026-11-19 jak3 crash re-diagnosis — FIX 146 (AI-assisted)
+
+- Both jak3 runs on the card (FIX 142 build at 66.5 s, FIX 145 build `632aeeb8` at 210.9 s) ended with
+  `[ASSERT] 'tag.addr == 0' dma_chain_read.h:68` -> `_exit(1)`. Symbolized with the run log's
+  `symbol anchor` (`exec_runtime` = ELF 0x9cea0) against the deployed ELF: both are in GL
+  `OceanEnvmap::handle_ocean_envmap_jak2` (run 1 main loop, run 2 `find_sky_color`) on
+  OCEAN_MID_FAR via dkgl. **FIX 145's hfrag attribution was wrong** (run 2 shows hfrag `bad-tag 0`).
+- The Atmosphère report `01795178308` (hbloader data abort in a memset) is run 1's teardown after the assert.
+- Root cause of the bad tag is still unknown (GOAL ocean packets are well-formed; chain is acked after
+  the walk). **FIX 146 (dkgl_frame.cpp, NRO-only):** `run_bucket` pre-walks every dkgl bucket without
+  asserting (CNT addr, spr, CALL/RET depth, END/REFE, EE bounds); a bad bucket is skipped for that
+  frame, counted as `dma mismatch N bad M` on the `[dkgl] ocean` line, and the first 8 log
+  `[dkgl] FIX146 bad dma bucket ...` + raw quads around the tag (to find what overwrites it).
+- Card: `jak3.nro md5 ba73038b2fb9db5966fb14115ff497df` (backup `jak3.nro.bak632aeeb8-fix145`, logs `*.fix145run`;
+  copies in `hw-logs/jak3-crash-20261119-1143/`).

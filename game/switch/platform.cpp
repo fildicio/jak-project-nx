@@ -230,6 +230,13 @@ void switch_thread_core_report(const char* role) {
   if (!s_proc_mask_logged.exchange(true)) {
     switch_run_logf("[cores] process core mask = 0x%llx (%s)", (unsigned long long)proc_mask,
                     proc_ok ? "svcGetInfo" : "query FAILED");
+    // FIX 148 (AI-assisted): horizon-oc picks its clock profile by this ID (config.ini
+    // [<program id>] section); log it so a slow run can be matched to the profile used.
+    u64 program_id = 0;
+    if (R_SUCCEEDED(svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0))) {
+      switch_run_logf("[cores] program id %016llX (horizon-oc profile section)",
+                      (unsigned long long)program_id);
+    }
   }
   switch_run_logf("[cores] %-8s core=%u pref=%d mask=0x%llx%s", role, current, preferred,
                   (unsigned long long)mask, thread_ok ? "" : " (mask query FAILED)");
@@ -240,15 +247,57 @@ unsigned int switch_pin_current_thread(const char* role, int core) {
   // showed the pin layout above regressed frame pacing (see the block comment
   // for the numbers). Without the flag we only report, and the thread keeps
   // floating on the process core mask like every pre-F70 build.
-  static std::atomic<int> s_pin_mode{0};  // 0 = unresolved, 1 = on, -1 = off
+  // 0 = unresolved, 1 = FIX 70 strict pins, 2 = FIX 152 EE-owns-core-0 split, -1 = off
+  static std::atomic<int> s_pin_mode{0};
   int pin_mode = s_pin_mode.load(std::memory_order_relaxed);
   if (pin_mode == 0) {
-    FILE* f = fopen("sdmc:/gk_pin.txt", "r");
-    pin_mode = f ? 1 : -1;
-    if (f) {
-      fclose(f);
+    auto exists = [](const char* path) {
+      FILE* f = fopen(path, "r");
+      if (f) {
+        fclose(f);
+      }
+      return f != nullptr;
+    };
+    // FIX 152 (AI-assisted): hardware profile (jak3 city, FIX 151 [goal] ee wall/cpu) showed
+    // the EE thread ON a core for only 8.5 of its 19 ms gameplay frame: ~10.5 ms/frame it
+    // sat off-core right after display-sync handed the chain to the render thread, i.e.
+    // render capture (7-10 ms) and EE share a core -- libnx starts every thread with ideal
+    // core 0, so EE/IOP/DMP/EE-Worker/render all begin there. Split: EE alone on core 0
+    // (mask 0x1), every other thread floats on cores 1+2 (mask 0x6). Unlike FIX 70 nothing
+    // is squeezed onto ONE core, so the 70b burst stall can't recur. Opt-in via
+    // sdmc:/switch/<game>/gk_split.txt (gk_nosplit.txt forces it off).
+#ifdef SWITCH_GAME_NAME
+    // FIX 153: back to opt-in -- HW showed no gain (the EE time was a lock wait, not a core
+    // fight); keep the known-good floating layout as the default.
+    const bool split_default = false;
+#else
+    const bool split_default = false;
+#endif
+    if (exists("sdmc:/gk_pin.txt")) {
+      pin_mode = 1;
+    } else if (exists(SWITCH_LOG_PATH("gk_nosplit.txt"))) {
+      pin_mode = -1;
+    } else if (split_default || exists(SWITCH_LOG_PATH("gk_split.txt"))) {
+      pin_mode = 2;
+    } else {
+      pin_mode = -1;
     }
     s_pin_mode.store(pin_mode, std::memory_order_relaxed);
+  }
+  if (pin_mode == 2) {
+    const bool ee = !strcmp(role, "EE");
+    const int ideal = ee ? 0 : (core == 1 ? 1 : 2);
+    const u64 mask = ee ? 0x1 : 0x6;
+    const Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, ideal, mask);
+    static std::atomic<bool> s_split_logged{false};
+    if (!s_split_logged.exchange(true)) {
+      switch_run_logf("[cores] FIX 152 split: EE alone on core 0, others on cores 1+2");
+    }
+    if (R_FAILED(rc)) {
+      switch_run_logf("[cores] %-8s split mask FAILED rc=0x%x", role, rc);
+    }
+    switch_thread_core_report(role);
+    return (unsigned int)rc;
   }
   if (pin_mode < 0) {
     static std::atomic<bool> s_off_logged{false};
@@ -271,6 +320,15 @@ unsigned int switch_pin_current_thread(const char* role, int core) {
   }
   switch_thread_core_report(role);
   return (unsigned int)rc;
+}
+
+unsigned long long switch_thread_cpu_ns() {
+  u64 ticks = 0;
+  // InfoType_ThreadTickCount with subtype -1 = total over all cores; needs a real thread handle.
+  if (R_FAILED(svcGetInfo(&ticks, InfoType_ThreadTickCount, threadGetCurHandle(), (u64)-1))) {
+    return 0;
+  }
+  return armTicksToNs(ticks);
 }
 
 void switch_core_diag_periodic(const char* role) {

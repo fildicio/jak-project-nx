@@ -25,6 +25,7 @@
 #include "common/custom_data/Tfrag3Data.h"
 #include "common/dma/dma_chain_read.h"
 #include "common/dma/gs.h"  // T127: GifTag/GsZbuf/GsTex0/GsTex1/GsAlpha (distorter setup)
+#include "common/goal_constants.h"  // FIX 146: EE memory bounds for the chain check
 #include "common/texture/texture_slots.h"
 #include "common/util/FileUtil.h"
 #include "common/versions/versions.h"  // game_version_names (per-game flag paths)
@@ -522,6 +523,10 @@ int s_cur_bucket = -1;
 // would blur the backdrop; pure diagnostic, logged as `late` in the dkgl stats line.
 bool s_sky_menu_entry = false;
 u64 s_sky_menu_late = 0;
+// FIX 143 probe (AI-assisted): jak3's sky bucket had NO counter -- "sky halfres" is
+// jak2-gated (sky_halfres_wants), so a sky that stopped drawing on jak3 (desert "kinda
+// black", 2026-11-20) was invisible in the stats line. Cumulative SKY-bucket draws.
+u64 s_sky_draws = 0;
 // §7.0 E HW debug (AI-assisted): per-bucket draw/index census. The tie category buckets
 // draw through the shared emitter like everything else; on the 98878af1 HW run bucket 266
 // (ETIE_W_L1_WATER) burned ~15.6 ms/frame of GPU while its plain-water twin 265 (same
@@ -913,7 +918,7 @@ class SwitchEmitter final : public Emitter {
         jak2_menu_capture ||
         (s_bucket_ids == s_jak3_ids &&
          s_bucket_ids[s_cur_bucket] == (int)jak3::BucketId::BLIT_START);
-    if (jak2_menu_capture) {
+    if (seg.blit_prev) {  // FIX 148: jak3's BLIT_START capture is its menu entry too
       // FIX 135: this is the fx-copy-buf menu-entry capture; the same frame's sky bucket
       // must run full-res (see the s_sky_menu_entry comment near the top).
       s_sky_menu_entry = true;
@@ -1430,6 +1435,8 @@ BucketRenderer* s_renderers[kMaxBuckets] = {};
 // §7.0 I (AI-assisted): CPU ms each dkgl bucket's GL renderer spent in capture_until.
 double s_cap_cpu_ms[kMaxBuckets] = {};
 u64 s_dma_mismatch = 0;
+u64 s_dma_bad = 0;  // FIX 146: buckets skipped because their chain would trip a DmaFollower ASSERT
+u64 s_blackout_frames = 0;  // FIX 148 probe: frames run_blackout drew its fade quad
 u64 s_last_log_capture = 0;
 u64 s_eye_draws = 0, s_interleaved_frames = 0;
 // capture_begin/until/end state (#16/#19)
@@ -1486,6 +1493,11 @@ u64 s_sky_halfres_frames = 0, s_sky_halfres_fail = 0, s_sky_halfres_nodraw = 0;
 u64 s_sky_menu_frames = 0;         // FIX 134: sky-bucket frames kept full-res (menu backdrop)
 constexpr u64 kSkyMenuDrawMax = 8;  // menu mode = 3 backdrop quads; in-game sky = 20+
 u64 s_sky_prev_draws = ~0ull;      // last SKY_DRAW bucket draw count (menu detector)
+// FIX 149 (AI-assisted): draws the DirectRenderer sky fold merged away (one per folded
+// draw). The menu detector adds them back so it still sees the pre-fold count: jak3's
+// in-game sky averages ~9 draws before the fold, the fold would push it under
+// kSkyMenuDrawMax and silently send every frame down the full-res path.
+u64 s_sky_fold_draws = 0;
 
 void sky_make_objects() {
   gen_framebuffers(1, &s_sky_fbo);
@@ -1496,7 +1508,13 @@ void sky_make_objects() {
 }
 
 bool sky_halfres_wants(int bucket) {
-  if (g_game_version != GameVersion::Jak2 || bucket != (int)jak2::BucketId::SKY_DRAW) {
+  // FIX 148 (AI-assisted): jak3 too. Its SKY bucket is the same DirectRenderer and was the
+  // top GPU item on HW (b5 4.5-6.2 ms/frame vs jak2's ~3 ms), drawn after BLIT_START (3)
+  // like jak2's BUCKET_3, so the menu-entry exemption (s_sky_menu_entry) carries over.
+  const bool jak2_sky =
+      g_game_version == GameVersion::Jak2 && bucket == (int)jak2::BucketId::SKY_DRAW;
+  const bool jak3_sky = g_game_version == GameVersion::Jak3 && bucket == (int)jak3::BucketId::SKY;
+  if (!jak2_sky && !jak3_sky) {
     return false;
   }
   if (s_sky_fullres < 0) {
@@ -1569,6 +1587,102 @@ void sky_halfres_end(bool drew) {
   pending_target_consumed();
 }
 
+// FIX 146 (AI-assisted): jak3 hardware runs 2026-11-20 died twice with
+// "[ASSERT] 'tag.addr == 0' dma_chain_read.h:68" -> _exit(1). Symbolized against the
+// deployed ELF, both came from GL OceanEnvmap::handle_ocean_envmap_jak2 (main loop and
+// find_sky_color) on the OCEAN_MID_FAR bucket -- not hfrag as FIX 145 assumed. A GL renderer
+// walking the live EE chain ASSERT-exits on the first bad tag (and a wild REF addr reads past
+// EE memory). Walk the bucket once with the same semantics, without asserting, and skip the
+// bucket for this frame if any read would fail. Cost: one extra tag walk per dkgl bucket.
+const char* bucket_chain_problem(const void* data, u32 slot, u32 next_bucket, u32* bad_off,
+                                 u64* bad_tag) {
+  constexpr u32 kMem = (u32)EE_MAIN_MEM_SIZE;
+  u32 off = slot;
+  u32 stack[2] = {0, 0};
+  int sp = 0;
+  for (int i = 0; i < (1 << 20); i++) {
+    if (off == next_bucket) {
+      return nullptr;
+    }
+    *bad_off = off;
+    if (off < (u32)EE_MAIN_MEM_LOW_PROTECT || off > kMem - 16 || (off & 15)) {
+      *bad_tag = 0;
+      return "tag offset";
+    }
+    u64 raw;
+    memcpy(&raw, (const u8*)data + off, 8);
+    *bad_tag = raw;
+    const DmaTag tag(raw);
+    if (tag.spr) {
+      return "spr";
+    }
+    const u32 bytes = (u32)tag.qwc * 16;
+    u32 data_off = off + 16;
+    u32 next = 0;
+    switch (tag.kind) {
+      case DmaTag::Kind::CNT:
+        if (tag.addr != 0) {
+          return "cnt addr";
+        }
+        next = data_off + bytes;
+        break;
+      case DmaTag::Kind::NEXT:
+        next = tag.addr;
+        break;
+      case DmaTag::Kind::REF:
+      case DmaTag::Kind::REFS:
+        data_off = tag.addr;
+        next = off + 16;
+        break;
+      case DmaTag::Kind::CALL:
+        if (sp > 1) {
+          return "call depth";
+        }
+        stack[sp++] = data_off + bytes;
+        next = tag.addr;
+        break;
+      case DmaTag::Kind::RET:
+        if (sp == 0) {
+          return "ret empty";
+        }
+        next = stack[--sp];
+        break;
+      default:  // END / REFE: the follower ends; the bucket's next read would ASSERT
+        return "chain ends";
+    }
+    if (data_off > kMem || bytes > kMem - data_off) {
+      return "data range";
+    }
+    off = next;
+  }
+  *bad_tag = 0;
+  return "too long";
+}
+
+void log_bad_bucket(const void* data, int bucket, u32 slot, u32 off, u64 tag, const char* why) {
+  static int s_logged = 0;
+  if (s_logged >= 8) {
+    return;
+  }
+  s_logged++;
+  switch_run_logf("[dkgl] FIX146 bad dma bucket %d (%s) slot 0x%x tag@0x%x = %016llx: %s -- "
+                  "bucket skipped this frame",
+                  bucket, s_renderers[list_index(bucket)]
+                              ? s_renderers[list_index(bucket)]->name_and_id().c_str()
+                              : "?",
+                  slot, off, (unsigned long long)tag, why);
+  // a few quads around the bad tag, so the next HW log shows what overwrote the chain
+  if (off >= 0x100 && off <= (u32)EE_MAIN_MEM_SIZE - 0x40) {
+    for (u32 q = off - 0x30; q < off + 0x40; q += 16) {
+      u64 lo, hi;
+      memcpy(&lo, (const u8*)data + q, 8);
+      memcpy(&hi, (const u8*)data + q + 8, 8);
+      switch_run_logf("[dkgl] FIX146   %08x: %016llx %016llx%s", q, (unsigned long long)lo,
+                      (unsigned long long)hi, q == off ? "  <-- tag" : "");
+    }
+  }
+}
+
 void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucket, int list_idx) {
   s_cur_bucket = list_idx;
   s_lists[list_idx].segs.clear();
@@ -1633,7 +1747,14 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   s_srs->next_bucket = slot + 16;
   DmaFollower dma(data, slot);
   const u64 draws_before = draw_count();
-  {
+  const u64 folds_before = s_sky_fold_draws;
+  u32 bad_off = 0;
+  u64 bad_tag = 0;
+  const char* bad_why = bucket_chain_problem(data, slot, s_srs->next_bucket, &bad_off, &bad_tag);
+  if (bad_why) {
+    s_dma_bad++;
+    log_bad_bucket(data, bucket, slot, bad_off, bad_tag, bad_why);
+  } else {
     ProfilerNode node(r->name_and_id());
     ScopedProfilerNode prof(&node);
     r->render(dma, s_srs.get(), prof);
@@ -1641,7 +1762,8 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   // §7.2 half-res sky: back to the frame target + queue the composite blit (replayed after
   // this bucket's draw list, before the next segment). A zero-draw bucket is a GL no-op.
   if (sky_wants) {
-    s_sky_prev_draws = draw_count() - draws_before;  // FIX 134 menu-mode stamp
+    // FIX 134 menu-mode stamp; FIX 149: + folded draws = the pre-fold count
+    s_sky_prev_draws = draw_count() - draws_before + (s_sky_fold_draws - folds_before);
     if (sky_halfres && s_sky_prev_draws <= kSkyMenuDrawMax) {
       // FIX 135 evidence: this frame's sky turned out menu-sized while half-res ran (the
       // prev-draw detector missed it -- e.g. a menu screen whose own sky draws exceed the
@@ -1652,6 +1774,13 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
       // remaining blur is baked on the capture side.
       s_sky_menu_late++;
     }
+  }
+  // FIX 143 probe: count jak3's sky-bucket draws (jak2's are stamped above; the halfres
+  // counters are jak2-gated). skydraw 0 while standing in the desert = the sky bucket
+  // never draws (registration/dispatch bug); skydraw climbing with a black sky = the
+  // draws happen and the [skytex] lines say what they sampled.
+  if (g_game_version == GameVersion::Jak3 && bucket == (int)jak3::BucketId::SKY) {
+    s_sky_draws += draw_count() - draws_before;
   }
   if (sky_halfres) {
     sky_halfres_end(draw_count() != draws_before);
@@ -1688,7 +1817,7 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   s_lists[list_idx].draws = draw_count() - draws_before;
   s_win_draws[list_idx] += s_lists[list_idx].draws;  // Row I: per-window draw profile
   restore_bucket_end_state();  // T113: no colour mask / stencil leaks into native passes
-  if (dma.current_tag_offset() != s_srs->next_bucket) {
+  if (!bad_why && dma.current_tag_offset() != s_srs->next_bucket) {
     s_dma_mismatch++;  // OpenGLRenderer asserts here; dkgl only counts (logged per 10 s)
   }
   close_segment();
@@ -1705,6 +1834,7 @@ void run_blackout(float alp) {
   if (!s_blackout || !(alp < 1.f)) {
     return;
   }
+  s_blackout_frames++;  // FIX 148 probe: frames covered by the fade quad (10 s stats line)
   s_cur_bucket = idx;
   begin_bucket();
   s_emitter.bucket_start();
@@ -1732,8 +1862,19 @@ void run_blackout(float alp) {
 
 }  // namespace
 
+void note_sky_fold_draw() {
+  s_sky_fold_draws++;
+}
+
 void set_pmode_alp(float alp) {
-  s_pmode_alp.store(alp, std::memory_order_relaxed);
+  const float prev = s_pmode_alp.exchange(alp, std::memory_order_relaxed);
+  // FIX 148 probe (AI-assisted): jak3 "black after losing" -- log every blackout state change
+  // (0 = black, 0..1 = fading, 1 = visible) so the HW log shows whether the fade ever lifts.
+  auto state = [](float a) { return a <= 0.f ? 0 : (a >= 1.f ? 2 : 1); };
+  static std::atomic<int> s_budget{300};
+  if (state(prev) != state(alp) && s_budget.fetch_sub(1) > 0) {
+    switch_run_logf("[dkgl] blackout alp %.3f -> %.3f", prev, alp);
+  }
 }
 
 void set_common_level(const tfrag3::Level* level) {
@@ -3267,13 +3408,23 @@ void distort_dma(DmaFollower& dma) {
   const float colorf[4] = {c.x() / 255.0f, c.y() / 255.0f, c.z() / 255.0f, c.w() / 255.0f};
   uniform4fv(get_uniform_location((u32)shader.id(), "u_color"), 1, colorf);
   // vertex + index data, then the strips (split by the restart index, ocean/shadow2 path)
+  // FIX 142 (AI-assisted): DYNAMIC_DRAW, not STATIC_DRAW. buffer_data() pins every
+  // STATIC_DRAW+data spec into the 2 MB persistent ring; the distort verts/indices are
+  // REBUILT EVERY FRAME (distort_build_vertices clears both), so a few distort frames
+  // exhausted kPersistBytes and from then on the ring_alloc failed -> BufferObj stayed
+  // dead/empty -> the draw was skipped every active frame with exactly
+  //   "draw skipped: attrib 0 buffer ... dead/empty (program sprite_distort, ...)"
+  // (2026-11-20 HW run: skip attrib 567, no distort pass ever visible -- the PeaceMaker/Vulcan
+  // L2 electric ray is a distortion-family effect and never shimmered). DYNAMIC_DRAW takes
+  // the per-frame data ring instead (8 MB, ~<100 KB of distort data per frame), which is
+  // rewritten every capture anyway.
   bind_vertex_array(s_distort_vao);
   bind_buffer(gl::ARRAY_BUFFER, s_distort_vbo);
   buffer_data(gl::ARRAY_BUFFER, s_distort_verts.size() * sizeof(DistortVertex),
-              s_distort_verts.data(), gl::STATIC_DRAW);
+              s_distort_verts.data(), gl::DYNAMIC_DRAW);
   bind_buffer(gl::ELEMENT_ARRAY_BUFFER, s_distort_ibo);
   buffer_data(gl::ELEMENT_ARRAY_BUFFER, s_distort_idx.size() * sizeof(u32),
-              s_distort_idx.data(), gl::STATIC_DRAW);
+              s_distort_idx.data(), gl::DYNAMIC_DRAW);
   enable(gl::PRIMITIVE_RESTART);
   primitive_restart_index(UINT32_MAX);
   draw_elements(gl::TRIANGLE_STRIP, (int)s_distort_idx.size(), gl::UNSIGNED_INT, nullptr);
@@ -3418,10 +3569,10 @@ void capture_end() {
     s_last_log_capture = s_captures;
     switch_run_logf(
         "[dkgl] ocean %llu frames | segs %u+%u | data %u/%u KB ubo %u/%u KB high | fails "
-        "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu | cmd overflow "
+        "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu bad %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
         "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu nodraw %llu menu %llu"
-        " late %llu | revblit %llu | copyback %llu zoomblur %llu slowtime %llu colorfilt %llu",
+        " late %llu skydraw %llu fold %llu | revblit %llu | copyback %llu zoomblur %llu slowtime %llu colorfilt %llu | blackout %llu alp %.2f",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
         (unsigned)s_lists[std::max(
              0,
@@ -3437,7 +3588,7 @@ void capture_end() {
         (unsigned long long)bad_attrib_draw_count(),
         (unsigned long long)missing_element_draw_count(), (unsigned long long)bad_ubo_draw_count(),
         (unsigned long long)int_attrib_skip_count(),
-        (unsigned long long)s_dma_mismatch,
+        (unsigned long long)s_dma_mismatch, (unsigned long long)s_dma_bad,
         (unsigned long long)s_cmd_overflows, (unsigned long long)unsupported_blit_count(),
         (unsigned long long)s_eye_draws, (unsigned long long)s_interleaved_frames,
         (unsigned long long)s_tex_anim_dispatches, (unsigned long long)s_glow_sprites,
@@ -3445,9 +3596,12 @@ void capture_end() {
         (unsigned long long)s_distort_bad, (unsigned long long)s_sky_halfres_frames,
         (unsigned long long)s_sky_halfres_fail, (unsigned long long)s_sky_halfres_nodraw,
         (unsigned long long)s_sky_menu_frames, (unsigned long long)s_sky_menu_late,
+        (unsigned long long)s_sky_draws,  // FIX 143: jak3 sky bucket engagement
+        (unsigned long long)s_sky_fold_draws,  // FIX 149: sky double-draw fold engagement
         (unsigned long long)rev_blit_count(),  // FIX 136: A/B engagement readout
         (unsigned long long)s_copyback_frames, (unsigned long long)s_zoomblur_frames,
-        (unsigned long long)s_slowtime_frames, (unsigned long long)s_colorfilt_frames);
+        (unsigned long long)s_slowtime_frames, (unsigned long long)s_colorfilt_frames,
+        (unsigned long long)s_blackout_frames, (double)s_pmode_alp.load(std::memory_order_relaxed));
     // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
     // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
     // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData
@@ -3767,7 +3921,13 @@ bool record_bucket(int bucket) {
 // the frame's dkgl lists were called, so the copy reads the final minimap content.
 void map_probe(DkCmdBuf cb) {
   constexpr u32 kPx = 128 * 128;  // one ProgressRenderer off-screen map target
-  if (!s_mapprobe_on || s_mapprobe_rounds >= 5) {
+  // FIX 143 (AI-assisted): was 5 rounds x ~5 s, all spent on the title screen -- the
+  // 2026-11-20 run's probes went EMPTY 24-34 s while the minimap only renders in
+  // gameplay. 12 rounds x ~30 s covers the first ~6 minutes, including the pause-menu
+  // map page moment. The arm line also prints what the pool currently holds in VRAM
+  // slot 4032 (GOAL also loads sprite textures there, e.g. lasersmoke-31 displaced
+  // the map mid-run) so content-vs-slot can be correlated per round.
+  if (!s_mapprobe_on || s_mapprobe_rounds >= 12) {
     return;
   }
   if (s_mapprobe_armed) {
@@ -3801,8 +3961,8 @@ void map_probe(DkCmdBuf cb) {
     s_mapprobe_rounds++;
     return;
   }
-  if (s_captures < 300 || s_captures < s_mapprobe_last + 300) {
-    return;  // first probe ~5 s in, then every ~5 s, five rounds
+  if (s_captures < 300 || s_captures < s_mapprobe_last + 1800) {
+    return;  // first probe ~5 s in, then every ~30 s, twelve rounds (FIX 143)
   }
   if (!s_hud_progress_a) {
     switch_run_logf("[dkgl] map probe: no hud renderer -- disabling");
@@ -3838,7 +3998,16 @@ void map_probe(DkCmdBuf cb) {
   s_mapprobe_armed = true;
   s_mapprobe_at = s_captures;
   s_mapprobe_last = s_captures;
-  switch_run_logf("[dkgl] map probe #%u armed", (unsigned)s_mapprobe_rounds + 1);
+  {
+    // FIX 143 (AI-assisted): what the pool resolves for the map page's sample tbp right
+    // now. Id 0/placeholder or a sprite name means the menu page would draw the wrong
+    // thing even though the off-screen capture itself has content.
+    const auto slot4032 = s_srs->texture_pool->lookup(4032);
+    switch_run_logf("[dkgl] map probe #%u armed (pool 4032 -> gl %llu, %s)",
+                    (unsigned)s_mapprobe_rounds + 1,
+                    slot4032 ? (unsigned long long)*slot4032 : 0ull,
+                    s_srs->texture_pool->get_debug_texture_name_from_tbp(4032).c_str());
+  }
 }
 
 bool record_blackout() {

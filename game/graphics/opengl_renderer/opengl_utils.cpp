@@ -294,8 +294,6 @@ void FramebufferCopier::copy_region_now(int render_fb_w,
   if (m_fbo_width != render_fb_w || m_fbo_height != render_fb_h) {
     m_fbo_width = render_fb_w;
     m_fbo_height = render_fb_h;
-    // The old capture is destroyed by the resize: nothing valid is held any more.
-    m_has_contents = false;
 
     // FIX 60 (AI-assisted): never redefine a texture that is still attached to a
     // live framebuffer. The 2026-09-28 Switch crash report symbolised to
@@ -350,10 +348,6 @@ void FramebufferCopier::copy_region_now(int render_fb_w,
   );
 
   glBindFramebuffer(GL_FRAMEBUFFER, render_fb);
-
-  // FIX 50 (AI-assisted): this copier now holds a valid capture, so a later caller
-  // in the same frame that needs the same image can skip re-capturing it.
-  m_has_contents = true;
 }
 
 void FramebufferCopier::copy_back_now(int render_fb_w, int render_fb_h, GLuint render_fb) {
