@@ -166,7 +166,16 @@ static_assert(kOffDkglSamplers % DK_SAMPLER_DESCRIPTOR_ALIGNMENT == 0, "dkgl sam
 // T54: 8 -> 128 MB. T57: 128 -> 384 MB -- the T55 hardware run filled 128 MB with common +
 // 2 levels (6 failed allocations at the beach prefetch); jak1 keeps up to 4 levels live.
 // Heap free was ~2.5 GB in that run. 0x18000000 is a DK_MEMBLOCK_ALIGNMENT multiple.
-constexpr uint32_t kPoolBytes = 384 * 1024 * 1024;  // T57: 384 MB = 1536 x 256 KB size classes
+// FIX 158: 384 -> 512 MB -- the jak3 comb (Catacombs) mission streams comba..combx (7 area
+// files) on top of the wasteland + city + common data, and the 2026-11-23 gk_run_log shows
+// 31 hard dk_acquire failures in the first 45 s of the mission (t=531..571, pool fail
+// counter, no reclaim victim: every loaded level was active/desired). Every failure is a
+// tie/shrub/tfrag vertex buffer that NEVER uploads (id 0 = "skip the upload", FIX 33
+// contract; the loader stages never retry), so its trees are silently skipped by the native
+// recorders -- the deeper Catacombs tunnels are simply missing ("tunnel disappears after
+// the first one", user report). Heap free at that moment was ~1.6 GB, so +128 MB is safe.
+// 0x20000000 is a DK_MEMBLOCK_ALIGNMENT multiple.
+constexpr uint32_t kPoolBytes = 512 * 1024 * 1024;  // FIX 158: 512 MB = 2048 x 256 KB size classes
   // T05: one memblock for shader code, sized to fit both splash shaders with room to
   // spare. A .dksh's code section is small (the control stays in its static embedding).
   constexpr uint32_t kCodePool = 64 * 1024;
@@ -621,8 +630,9 @@ bool init(int fb_width, int fb_height) {
   } else {
     switch_run_logf("[dk] ubo ring UNUSABLE (init failed) — continuing without UBO ring");
   }
-  // T21/T57: a dedicated 384 MB deko3d memblock for the P2.3 level-data buffer pool. Same maker/flags
-  // as s_dataMem (CpuUncached|GpuCached); make_block adds it to the s_pool_bytes accounting. Inert:
+  // T21/T57: a dedicated deko3d memblock for the P2.3 level-data buffer pool (512 MB since
+  // FIX 158; was 384 MB T57). Same maker/flags as s_dataMem (CpuUncached|GpuCached);
+  // make_block adds it to the s_pool_bytes accounting. Inert:
   // nothing acquires yet (the first consumer is a P3 renderer). A failed memblock is not fatal --
   // we log it, leave s_poolMem null, and continue (the game still boots and draws the splash).
   s_poolMem = make_block(kPoolBytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "bufferpool");

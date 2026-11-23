@@ -9,7 +9,10 @@
 #include "game/graphics/opengl_renderer/background/background_common.h"
 
 #if defined(__SWITCH__)
+#include <unordered_map>
 #include <unordered_set>
+
+#include "game/graphics/deko3d_renderer/dk_texture_gpu.h"
 
 #include "game/switch/imgui_stub.h"
 #include "game/switch/run_log.h"
@@ -687,6 +690,25 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
                       a.w(), c0.x(), c0.y(), c0.z(), texs.c_str());
     }
   }
+  // J18 periodic light log (AI-assisted): the probe above logs once per boot, so a car that
+  // turns black later is never caught. gk_dkgl_merclog.txt = full lights every ~120 draws.
+  static const bool s_merc_log =
+      std::fopen("sdmc:/switch/jak3/gk_dkgl_merclog.txt", "r") != nullptr ||
+      std::fopen("sdmc:/switch/jak2/gk_dkgl_merclog.txt", "r") != nullptr;
+  if (s_merc_log) {
+    static std::unordered_map<u64, u32> s_calls;
+    static u32 s_lines = 0;
+    if (s_lines < 6000 && (s_calls[hash]++ % 120) == 0) {
+      s_lines++;
+      const auto& L = current_lights;
+      switch_run_logf("[merclog] %s amb=%.2f,%.2f,%.2f c0=%.2f,%.2f,%.2f c1=%.2f,%.2f,%.2f "
+                      "c2=%.2f,%.2f,%.2f d0=%.2f,%.2f,%.2f",
+                      model->name.c_str(), L.ambient.x(), L.ambient.y(), L.ambient.z(),
+                      L.color0.x(), L.color0.y(), L.color0.z(), L.color1.x(), L.color1.y(),
+                      L.color1.z(), L.color2.x(), L.color2.y(), L.color2.z(), L.direction0.x(),
+                      L.direction0.y(), L.direction0.z());
+    }
+  }
 #endif
 
   DrawArgs args;
@@ -1283,6 +1305,46 @@ void Merc2::flush_draw_buckets(SharedRenderState* render_state,
   m_next_mod_vtx_buffer = 0;
 }
 
+#if defined(__SWITCH__)
+namespace {
+// J18 bind probe (AI-assisted): black merc (jak3 cars, jak2 breakable walls) samples black RGB
+// with the model's own texture id. Log what the bound dk id really is at DRAW time: alive or
+// freed, and the image's size/format/mips next to the fr3 texture it should be. One line per
+// id, plus a line whenever its alive state flips; dead binds are counted.
+void merc_bind_probe(const LevelData* lev, int ti) {
+  static std::unordered_map<u32, int> s_seen;  // id -> last alive state
+  static u32 s_lines = 0;
+  static u64 s_dead = 0;
+  static u64 s_next_dead_report = 1;
+  const u32 id = lev->textures[ti];
+  u32 w = 0, h = 0, mips = 0, fmt = 0;
+  const bool alive = dktexgpu::describe(id, &w, &h, &mips, &fmt);
+  if (!alive && ++s_dead >= s_next_dead_report) {
+    s_next_dead_report *= 2;
+    switch_run_logf("[mercbind] dead binds total %llu", (unsigned long long)s_dead);
+  }
+  auto it = s_seen.find(id);
+  if (it != s_seen.end() && it->second == (int)alive) {
+    return;
+  }
+  s_seen[id] = (int)alive;
+  if (s_lines >= 1500) {
+    return;
+  }
+  s_lines++;
+  const tfrag3::Texture* t = (lev->level && ti < (int)lev->level->textures.size())
+                                 ? &lev->level->textures[ti]
+                                 : nullptr;
+  const bool mismatch = t && alive && (t->w != w || t->h != h);
+  switch_run_logf("[mercbind] lev=%s t%d id=%u alive=%d dk=%ux%u m%u f%u fr3=%s/%s %ux%u f%u%s",
+                  lev->level ? lev->level->level_name.c_str() : "?", ti, (unsigned)id,
+                  (int)alive, w, h, mips, fmt, t ? t->debug_tpage_name.c_str() : "?",
+                  t ? t->debug_name.c_str() : "?", t ? t->w : 0, t ? t->h : 0,
+                  t ? (unsigned)t->format : 0, mismatch ? " MISMATCH" : "");
+}
+}  // namespace
+#endif
+
 void Merc2::do_draws(const Draw* draw_array,
                      const LevelData* lev,
                      u32 num_draws,
@@ -1296,6 +1358,18 @@ void Merc2::do_draws(const Draw* draw_array,
   bool normal_vtx_buffer_bound = true;
 
   bool fog_on = true;
+#if defined(__SWITCH__)
+  {
+    // J18 fog probe (AI-assisted): distant jak3 merc fogs to black. Which fog colour does
+    // merc get? (FIX 156 fills render_state->fog_color from the bucket-2 vis packets.)
+    static u32 s_fog_calls = 0;
+    if ((s_fog_calls++ % 3000) == 0 && s_fog_calls < 60000) {
+      switch_run_logf("[mercfog] rgb=%u,%u,%u intensity=%.1f",
+                      (unsigned)render_state->fog_color[0], (unsigned)render_state->fog_color[1],
+                      (unsigned)render_state->fog_color[2], (double)render_state->fog_intensity);
+    }
+  }
+#endif
 
   for (u32 di = 0; di < num_draws; di++) {
     auto& draw = draw_array[di];
@@ -1338,6 +1412,9 @@ void Merc2::do_draws(const Draw* draw_array,
 #endif
     if (draw.texture != last_tex) {
       if (draw.texture < (int)lev->textures.size() && draw.texture >= 0) {
+#if defined(__SWITCH__)
+        merc_bind_probe(lev, draw.texture);
+#endif
         glBindTexture(GL_TEXTURE_2D, lev->textures.at(draw.texture));
       } else if ((draw.texture & 0xffffff00) == 0xefffff00) {
         // Switch dkgl (AI-assisted): the dkgl render state has no EyeRenderer; the native
@@ -1390,6 +1467,19 @@ void Merc2::do_draws(const Draw* draw_array,
       set_uniform(uniforms.light_color[1], m_lights_buffer[draw.light_idx].color1);
       set_uniform(uniforms.light_color[2], m_lights_buffer[draw.light_idx].color2);
       set_uniform(uniforms.light_ambient, m_lights_buffer[draw.light_idx].ambient);
+#if defined(__SWITCH__)
+      // J18 A/B (AI-assisted): neutral lights on all merc. Cars coloured with this flag ->
+      // the game's light values are the bug; still black -> texture/GPU side.
+      static const bool s_light_fix =
+          std::fopen("sdmc:/switch/jak3/gk_dkgl_merclightfix.txt", "r") != nullptr ||
+          std::fopen("sdmc:/switch/jak2/gk_dkgl_merclightfix.txt", "r") != nullptr;
+      if (s_light_fix) {
+        set_uniform(uniforms.light_color[0], math::Vector4f(1.f, 1.f, 1.f, 1.f));
+        set_uniform(uniforms.light_color[1], math::Vector4f(0.f, 0.f, 0.f, 1.f));
+        set_uniform(uniforms.light_color[2], math::Vector4f(0.f, 0.f, 0.f, 1.f));
+        set_uniform(uniforms.light_ambient, math::Vector4f(0.5f, 0.5f, 0.5f, 1.f));
+      }
+#endif
       last_light = draw.light_idx;
     }
 

@@ -66,6 +66,9 @@ class BufferPool {
 
   // Telemetry.
   uint32_t outstanding() const;     // live (handed-out) chunk count
+  // FIX 158: capacity sum of the live chunks (the pool's real usage; the fps-line
+  // "pool out=N" chunk count alone says nothing about how full the region is).
+  uint32_t outstanding_bytes() const;
   uint32_t pooled_chunks() const;   // free (pooled) chunk count
   size_t pooled_bytes() const;      // bytes inside the free list (capacity sum)
   uint32_t region_unused_bytes() const;  // bytes of the region never carved (size - bump)
@@ -204,6 +207,16 @@ inline void BufferPool::release(uint32_t id) {
 }
 
 inline uint32_t BufferPool::outstanding() const { return static_cast<uint32_t>(m_live.size()); }
+
+// FIX 158: capacity sum of the live (handed-out) chunks -- how much of the fixed region
+// is actually in use, for the [dk] telemetry line and the acquire-failure log.
+inline uint32_t BufferPool::outstanding_bytes() const {
+  uint64_t sum = 0;
+  for (const auto& [id, chunk] : m_live) {
+    sum += chunk.capacity;
+  }
+  return static_cast<uint32_t>(sum);
+}
 
 inline uint32_t BufferPool::pooled_chunks() const {
   return static_cast<uint32_t>(m_free.size());  // T89: free ranges after coalescing

@@ -1791,8 +1791,11 @@ void DkDisplay::render() {
       // pool: P2.3 BufferPool (T21); null when dk_device never carved its region.
       size_t pos = strlen(tel);
       if (pool != nullptr) {
-        snprintf(tel + pos, sizeof(tel) - pos, "pool out=%u pooled=%u fail=%d | ",
-                 pool->outstanding(), pool->pooled_chunks(), pool->failed_allocations());
+        // FIX 158: added the live MB -- the chunk count alone hid how full the 512 MB
+        // region actually was when the Catacombs tunnels went missing.
+        snprintf(tel + pos, sizeof(tel) - pos, "pool out=%u/%uMB pooled=%u fail=%d | ",
+                 pool->outstanding(), (unsigned)(pool->outstanding_bytes() >> 20),
+                 pool->pooled_chunks(), pool->failed_allocations());
       } else {
         snprintf(tel + pos, sizeof(tel) - pos, "pool - | ");
       }

@@ -833,6 +833,9 @@ void record_mid_far(int fb_w, int fb_h) {
   const DkGpuAddr data = dkMemBlockGetGpuAddr(dkdev::data_mem());
   // Descriptor sets first: the texture-gen pass binds textures too.
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::sampler_set_count());
   record_texture_gen(cb);
@@ -931,6 +934,9 @@ void record_near(int fb_w, int fb_h) {
   DkViewport vp = {0.0f, 0.0f, (float)fb_w, (float)fb_h, 0.0f, 1.0f};
   dkCmdBufSetViewports(cb, 0, &vp, 1);
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::sampler_set_count());
   const int buckets[3] = {0, 1, 2};

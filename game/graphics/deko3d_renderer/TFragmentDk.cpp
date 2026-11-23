@@ -13,6 +13,7 @@
 #endif
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "common/dma/dma_chain_read.h"
 #include "common/dma/gs.h"
@@ -684,6 +685,21 @@ void arm_replay_dump(const char* dir, int frames) {
 }
 #endif
 
+// FIX 158: a tfrag tree whose GPU vertex buffer never uploaded (the loader's pool acquire
+// failed when the level staged; LoaderStages stores id 0 and never retries) is skipped
+// silently forever -- like the tie path's Catacombs "tunnel disappears" hole. Log each
+// missing tree ONCE per session so gk_run_log.txt names the exact hole.
+static void log_missing_vb(const char* what, const char* level, int geom, size_t t) {
+  static std::unordered_set<std::string> s_logged;
+  char key[96];
+  snprintf(key, sizeof(key), "%s:%s:%d:%zu", what, level, geom, t);
+  if (s_logged.insert(key).second) {
+    switch_run_logf("[dk] %s tree MISSING GPU vertex buffer: level '%s' geo %d tree %zu"
+                    " -- never uploaded (pool full at load, FIX 158 log)",
+                    what, level, geom, (unsigned)t);
+  }
+}
+
 void build_frame(Loader* loader) {
   s_frame.cams.clear();
   s_frame.draws.clear();
@@ -764,6 +780,9 @@ void build_frame(Loader* loader) {
       }
       const dkpool::PoolBuffer* vb = dk_loader_buffer_find(ld->tfrag_vertex_data[geom][t]);
       if (vb == nullptr || tree.unpacked.indices.empty()) {
+        if (vb == nullptr && !tree.unpacked.indices.empty()) {
+          log_missing_vb("tfrag", s_cap[b].pc.level_name, geom, t);
+        }
         if (s_golden) {
           gold("skip pass %d tree %zu %s", b, t, vb ? "no-indices" : "no-vertex-buffer");
         }

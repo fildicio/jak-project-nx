@@ -87,6 +87,9 @@ void record_eyes() {
   DkShader const* sh[] = {&vsh, &fsh};
   dkCmdBufBindShaders(cb, DkStageFlag_GraphicsMask, sh, 2);
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::sampler_set_count());
   const DkVtxBufferState vbuf = {sizeof(Vertex), 0};

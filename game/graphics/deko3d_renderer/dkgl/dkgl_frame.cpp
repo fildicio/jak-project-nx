@@ -148,6 +148,7 @@ bool glow_math(const SpriteGlowConsts* consts,
                SpriteGlowOutput* out);
 
 namespace dkgl {
+extern bool g_no_ubo_reuse;  // dkgl_draw.cpp, J18 A/B
 namespace {
 
 // ---- memory: one CPU-visible memblock ----------------------------------------------------
@@ -187,6 +188,10 @@ bool s_fence_armed[kSlots] = {};
 bool s_frame_lists_called = false;
 Ring s_data[kSlots], s_ubo[kSlots], s_persist;
 u32 s_slot = 0;          // slot being recorded / last recorded
+// J18 (AI-assisted): bumped on every UBO ring reset. Row I slice reuse is keyed on this,
+// not on s_slot: s_captures % kSlots repeats, so a program idle for kSlots-1 frames (or a
+// capture that aborted after the reset) could re-bind a slice whose memory was recycled.
+u32 s_ubo_gen = 0;
 u64 s_captures = 0;
 bool s_recording = false;
 bool s_spare_used = false;
@@ -773,6 +778,9 @@ const ProgramShaders* find_program(const char* name) {
 void emit_fixed_state(DkCmdBuf cb) {
   const DkGpuAddr data = dkMemBlockGetGpuAddr(dkdev::data_mem());
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::dkgl_sampler_slot(kSamplerCombos - 1) + 1);
   DkRasterizerState rs;
@@ -1073,7 +1081,7 @@ class SwitchEmitter final : public Emitter {
   bool ubo_alloc(u32 bytes, void** cpu, u64* gpu) override {
     return ring_take(s_ubo[s_slot], bytes, DK_UNIFORM_BUF_ALIGNMENT, cpu, gpu);
   }
-  u32 ubo_ring_slot() const override { return s_slot; }  // Row I: slice-reuse validity
+  u32 ubo_ring_slot() const override { return s_ubo_gen; }  // Row I: slice-reuse validity
   void draw_arrays(DkPrimitive prim, u32 first, u32 count) override {
     if (s_recording) {
       if (s_cur_bucket >= 0) {  // §7.0 E census
@@ -2360,6 +2368,18 @@ bool init_jak3_foreground(TexturePool* pool, int loaded) {
   // GL name is "generic2-lcom-water" on GMERC2_LCOM_WATER (PRIM) -- not a typo.
   add_generic((int)jak3::BucketId::GMERC2_LCOM_WATER, "generic2-lcom-water", 0,
               Generic2::Mode::PRIM);
+  // FIX 160 (AI-assisted, Arc Wielder beam): the kJak3Buckets comment above lists
+  // generic-sprite-1/2 (PRIM) + generic-sprite-3 (LIGHTNING) as running, but init never
+  // registered a renderer on them -- capture_until's null check silently skipped the
+  // three lists, so the lightning prim strips (lightning-bolt -> bucket 569 when
+  // use-sprite-bucket? is set, e.g. gun-blue-2 / the Arc Wielder) never drew. Same
+  // add_generic pattern as GL init_bucket_renderers_jak3 727-736.
+  add_generic((int)jak3::BucketId::GENERIC_SPRITE_1, "generic-sprite-1", 0,
+              Generic2::Mode::PRIM);
+  add_generic((int)jak3::BucketId::GENERIC_SPRITE_2, "generic-sprite-2", 0,
+              Generic2::Mode::PRIM);
+  add_generic((int)jak3::BucketId::GENERIC_SPRITE_3, "generic-sprite-3", 0,
+              Generic2::Mode::LIGHTNING);
   {
     // T128 pattern: GL registers Warp on GENERIC_WARP ("generic-warp"); its
     // FramebufferCopier goes through the dkgl overrides (FBO + texture), like the
@@ -2778,6 +2798,9 @@ bool init(TexturePool* pool, Loader* loader) {
   install_glad();
   // #19: decide before ShaderLibrary links the programs (SharedRenderState below)
   s_merc_native = flag("gk_dkgl_nativemerc.txt") || flag("gk_dkgl_noemerc.txt");
+  dktexgpu::set_desc_invalidate(!flag("gk_dk_nodescinval.txt"));  // FIX 159 A/B
+  switch_run_logf("[dk] FIX 159 descriptor-cache invalidate %s",
+                  dktexgpu::desc_invalidate_flags() ? "ON" : "OFF (gk_dk_nodescinval.txt)");
   force_program_inert(s_merc_native ? "merc2" : nullptr);
   set_emitter(&s_emitter);
   set_external_buffer_lookup(loader_buffer);
@@ -2928,6 +2951,9 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
     g_dkgl_copyprobe = true;
     switch_run_logf("[dkgl] copyback %s (gk_dkgl_copyback.txt)",
                     s_copyback_on ? "ON" : "off");
+    g_no_ubo_reuse = flag("gk_dkgl_nouboreuse.txt");
+    switch_run_logf("[dkgl] ubo reuse %s (gk_dkgl_nouboreuse.txt)",
+                    g_no_ubo_reuse ? "OFF" : "on");
   }
   // Like OpenGLRenderer's per-frame m_render_state.frame_idx++ (AI-assisted). Tie3's
   // render_from_another only draws when its master ran THIS frame; with frame_idx stuck,
@@ -2953,6 +2979,7 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
   }
   s_data[s_slot].used = 0;
   s_ubo[s_slot].used = 0;
+  ++s_ubo_gen;
   s_spare_used = false;
   s_cap_overflows_before = s_cmd_overflows;
   dkCmdBufClear(s_cb);

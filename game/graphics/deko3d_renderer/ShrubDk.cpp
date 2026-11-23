@@ -8,11 +8,14 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #if defined(__SWITCH__)
 #include <unistd.h>
 #endif
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/dma/dma_chain_read.h"
@@ -357,6 +360,20 @@ const dktf::FrameDraws& frame_draws() {
   return s_frame;
 }
 
+// FIX 158: a shrub tree whose GPU vertex buffer never uploaded (loader pool acquire
+// failed at stage time; id 0 is never retried) is skipped silently forever. Log each
+// missing tree ONCE per session, like the tie/tfrag paths.
+static void log_missing_vb(const char* level, size_t t) {
+  static std::unordered_set<std::string> s_logged;
+  char key[96];
+  snprintf(key, sizeof(key), "shrub:%s:%zu", level, t);
+  if (s_logged.insert(key).second) {
+    switch_run_logf("[dk] shrub tree MISSING GPU vertex buffer: level '%s' tree %zu"
+                    " -- never uploaded (pool full at load, FIX 158 log)",
+                    level, (unsigned)t);
+  }
+}
+
 void build_frame(Loader* loader) {
   // same as TieDk: record_list fogs with f.fog_rgba, taken from tfrag (built first) (AI-assisted)
   memcpy(s_frame.fog_rgba, dktf::frame_draws().fog_rgba, 4);
@@ -425,6 +442,9 @@ void build_frame(Loader* loader) {
       const auto& tree = trees[t];
       const dkpool::PoolBuffer* vb = dk_loader_buffer_find(ld->shrub_vertex_data[t]);
       if (vb == nullptr || tree.indices.empty()) {
+        if (vb == nullptr && !tree.indices.empty()) {
+          log_missing_vb(s_cap[b].pc.level_name, t);
+        }
         continue;
       }
       const uint32_t tod = tod_for(ld, tree, cam.itimes);

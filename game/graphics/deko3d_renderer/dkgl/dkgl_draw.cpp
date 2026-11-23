@@ -318,6 +318,8 @@ bool attrib_map(int size, u32 type, bool normalized, bool integer, DkVtxAttribSi
 
 }  // namespace
 
+bool g_no_ubo_reuse = false;  // J18 A/B: gk_dkgl_nouboreuse.txt (set in dkgl_frame.cpp)
+
 void reset_emit_cache() {
   g_cache = EmitCache{};
 }
@@ -754,6 +756,10 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
 #endif
   }
 
+  // J18 A/B (AI-assisted): gk_dkgl_nouboreuse.txt -> fresh uniform snapshot + UBO re-bind on
+  // every draw (no Row I slice reuse, no emit-cache skip for bindings 0-7).
+  const bool force_ubo = g_no_ubo_reuse;
+
   // 9b. TODO #5 (AI-assisted): glBindBufferRange(GL_UNIFORM_BUFFER) ranges (Merc2 bones,
   // ub_bones = binding 1 in the generated shaders), bound to both stages. A range whose
   // buffer has no live data skips the draw: skinning with stale bones would be garbage.
@@ -783,7 +789,8 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
     if (ubo_size[i] == 0) {
       continue;
     }
-    if (!g_cache.valid || g_cache.ubo_gpu[i] != ubo_gpu[i] || g_cache.ubo_size[i] != ubo_size[i]) {
+    if (force_ubo || !g_cache.valid || g_cache.ubo_gpu[i] != ubo_gpu[i] ||
+        g_cache.ubo_size[i] != ubo_size[i]) {
       e->bind_ubo(DkStage_Vertex, i, ubo_gpu[i], ubo_size[i]);
       e->bind_ubo(DkStage_Fragment, i, ubo_gpu[i], ubo_size[i]);
       g_cache.ubo_gpu[i] = ubo_gpu[i];
@@ -806,7 +813,7 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
   if (vs_bytes + fs_bytes > 0) {
     u64 slice_gpu = 0;
     u32 slice_slot = 0;
-    if (program_uniform_dirty(prog) ||
+    if (force_ubo || program_uniform_dirty(prog) ||
         (slice_gpu = program_uniform_slice(prog, &slice_slot)) == 0 ||
         slice_slot != e->ubo_ring_slot()) {
       slice_gpu = 0;
@@ -833,7 +840,7 @@ void flush_pending(u32 mode, int first, int count, u32 idx_type, u64 idx_off, bo
       }
       program_uniform_clear_dirty(prog);
     }
-    if (slice_gpu != 0 && (!g_cache.valid || g_cache.uni7_gpu != slice_gpu ||
+    if (slice_gpu != 0 && (force_ubo || !g_cache.valid || g_cache.uni7_gpu != slice_gpu ||
                            g_cache.uni7_vs != vs_bytes || g_cache.uni7_fs != fs_bytes)) {
       if (vs_bytes) {
         e->bind_ubo(DkStage_Vertex, 7, slice_gpu, vs_bytes);

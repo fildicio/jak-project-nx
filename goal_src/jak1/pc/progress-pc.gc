@@ -1126,46 +1126,14 @@
 								  bosnian))
 
 (define *text-languages*
+  ;; AI-assisted (user request 2026-11-23): only English + Italian.
   (static-text-list-array english
-                          uk-english
-                          french
-                          german
-                          spanish
-                          italian
-                          japanese
-                          portuguese
-                          br-portuguese
-                          swedish
-                          finnish
-                          danish
-                          norwegian
-                          dutch
-                          hungarian
-                          polish
-                          lithuanian
-                          czech
-                          croatian
-                          galician
-						  bosnian))
+                          italian))
 
 (define *subtitle-languages*
+  ;; AI-assisted (user request 2026-11-23): only English + Italian.
   (static-text-list-array english
-                          uk-english
-                          french
-                          german
-                          spanish
-                          italian
-                          br-portuguese
-                          swedish
-                          finnish
-                          danish
-                          dutch
-                          polish
-                          lithuanian
-                          czech
-                          croatian
-                          galician
-						  bosnian))
+                          italian))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  DYNAMIC MENU THINGS
@@ -2268,9 +2236,9 @@
                    (set! (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect4x3))
                   (((game-option-type language))
                    ;; language selection. if not on first language, go back. if on first language, go to last.
-                   (if (> (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 0)
-                     (+! (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify))) -1)
-                     (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify))) 5))
+                   ;; AI-assisted (user request 2026-11-23): only English (0) <-> Italian (4).
+                   (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify)))
+                         (if (= (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 4) 0 4))
                    ;; language was updated.
                    (set! (-> obj language-transition) #t)
                    (set! (-> obj language-direction) #t)
@@ -2355,9 +2323,9 @@
                    (set! (-> (the-as (pointer symbol) (-> options (-> obj option-index) value-to-modify))) 'aspect16x9))
                   (((game-option-type language))
                    ;; same thing as before. if at last, go to first. otherwise, keep going forward.
-                   (if (< (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 5)
-                     (1+! (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify))))
-                     (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify))) 0))
+                   ;; AI-assisted (user request 2026-11-23): only English (0) <-> Italian (4).
+                   (set! (-> (the-as (pointer int64) (-> options (-> obj option-index) value-to-modify)))
+                         (if (= (the-as int (-> (the-as (pointer uint64) (-> options (-> obj option-index) value-to-modify)))) 4) 0 4))
                    (set! (-> obj language-transition) #t)
                    (set! (-> obj language-direction) #f)
                    (set! sound? #t))

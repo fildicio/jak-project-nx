@@ -12,6 +12,7 @@
 // hands out dkpool chunks (dkdev::buffer_pool()) instead of GL buffers; the GLuint id
 // handed to the Loader is the dkpool chunk id.
 #include "game/graphics/pipelines/dk_device.h"  // dkdev::is_up(), dkdev::buffer_pool()
+#include "game/switch/run_log.h"                // FIX 158: loud acquire-failure logging
 
 //! T55: the dk chunk behind every id GpuBufferPool handed out on the deko3d path.
 //! upload_to_buffer() (LoaderStages.cpp) and later dk renderers look ids up here.
@@ -212,6 +213,20 @@ class GpuBufferPool {
         continue;
       }
       m_failed_allocations++;
+      // FIX 158: this failure leaves a PERMANENT hole in the level. The caller stores
+      // id 0 and the loader stage never retries (LoaderStages tie/shrub/tfrag create
+      // loops run once), so every tree backed by this buffer is silently skipped by the
+      // native recorders for the whole session -- the jak3 Catacombs "tunnel disappears
+      // after the first one" symptom (31 of these, t=531..571, gk_run_log 2026-11-23).
+      // Before FIX 158 the only trace was the aggregate "pool fail=N" counter.
+      switch_run_logf("[pool] dk buffer acquire FAILED: want %u KB | live %u chunks / %u MB"
+                      " | free %u MB (list %u + uncarved %u) | reclaim dry"
+                      " -- this level data will be MISSING",
+                      (unsigned)(size >> 10), pool->outstanding(),
+                      (unsigned)(pool->outstanding_bytes() >> 20),
+                      (unsigned)((pool->pooled_bytes() + pool->region_unused_bytes()) >> 20),
+                      (unsigned)(pool->pooled_bytes() >> 20),
+                      (unsigned)(pool->region_unused_bytes() >> 20));
       return 0;
     }
   }

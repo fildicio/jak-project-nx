@@ -3269,3 +3269,39 @@ Trim/gate these before the next long session.
 `06f798334cb9e9bfe0fc3075ce9ed31e` (FIX 156, deployed 12:46, see above).
 Pending HW tests: (1) jak3 audio-language switch mid-game (FIX 156); (2) the
 menu-audio probe above.
+
+---
+
+## 2026-11-23 (late) — Catacombs tunnel bug root-caused + FIX 158 (AI-assisted)
+
+**User report:** in the Catacombs (`comb`, the driving mission), after the first
+tunnel the tunnel disappears. Seen on older builds too — pre-existing, NOT the
+shrub fog cull (comb is drawn by the **tie** pass: gpu top tie7 4.34 / tie1 2.80 /
+tie6 0.50 ms; tfrag 0.03, shrub 0.00) and not FIX 156/157.
+
+**Root cause (from the gk_run_log comb session, t=526..571): 31 hard
+buffer-pool acquire failures in the first 45 s of the mission** (`pool fail=`
+5→10→19→27→31, frozen after t=571), zero `[loader] reclaim` evictions (no
+victim: all levels active/desired), zero tie `dropped`, zero tex/ubo failures.
+The comb mission streams comba..combx (7 area files) on top of wasteland +
+city + common — the fixed 384 MB (T57) pool region ran out mid-stream.
+`GpuBufferPool::dk_acquire` returned id 0 (FIX 33 contract), LoaderStages never
+retries, and the native tie/tfrag/shrub recorders silently skip trees whose
+vertex buffer never uploaded (`vb == nullptr -> continue`, no log, no counter)
+— a permanent, level-shaped hole: the deeper tunnels.
+
+**FIX 158:** (a) `kPoolBytes` 384→512 MB (heap free was ~1.6 GB at failure
+time); (b) every hard dk_acquire failure logs loudly (`[pool] dk buffer
+acquire FAILED: ... -- this level data will be MISSING`); (c) tie/tfrag/shrub
+log each never-uploaded tree once (`[dk] ... tree MISSING GPU vertex buffer:
+level/geo/tree`); (d) the [dk] line prints `pool out=N/NMB` so pool fullness is
+visible. Deferred: LoaderStages retrying id-0 buffers (permanent holes today).
+
+**HW test (next NRO deploy):** drive past the first Catacombs tunnel — the
+rest should be there; log should show no `[pool] ... FAILED` during comb, no
+`MISSING GPU vertex buffer` lines. Doc row: JAK3_BRINGUP_TODO.md J19.
+
+**Built:** jak3 NRO `af656fce54a57f91800ef61f9a6d0b8d` (FIX 158, ai-gate
+PASS incl. EL0 audit; host dk tests 24/24 PASS, dk-lint PASS). jak2 NRO not
+rebuilt yet — FIX 158 affects it too, rebuild at the next jak2 test. SD deploy
+is a human step (AGENT_KNOWLEDGE_MAP §12).

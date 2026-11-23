@@ -102,6 +102,9 @@ void record_list(const FrameDraws& f, int fb_w, int fb_h, int k, int range = -1,
   int shader_sel = 0;  // bound pair: 0 tfrag3/shrub, 1 etie_base (T97), 2 etie shine
   std::vector<uint64_t> etie_ubo(f.etie.size(), 0);
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::sampler_set_count());
   const DkVtxBufferState vbuf = {32, 0};

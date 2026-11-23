@@ -30,6 +30,7 @@
 
 #include <deko3d.h>
 #include <string.h>
+#include <cstdio>  // J18: A/B flag file
 #include <atomic>  // T47: one-shot log flag shared across threads
 #include <thread>  // T47: std::this_thread::get_id for the owner-thread guard
 #include <algorithm>  // T88: std::min
@@ -540,11 +541,21 @@ uint32_t upload_bcn_mipped(dktex::Fmt fmt, uint32_t w, uint32_t h, const uint8_t
     default:
       return 0;
   }
+  // J18 (AI-assisted): deko3d mis-handles BCn levels exactly 32 px tall and >= 32 px wide
+  // (see the loader's 32-tall RGBA fallback): writing such a MIP level corrupts level 0, so
+  // 64x64 / 128x64 car textures sampled black up close and fine far away. Stop the chain
+  // before that level. gk_dk_nobcn32clamp.txt = old behaviour for A/B.
+  static const bool s_no_clamp =
+      std::fopen("sdmc:/switch/jak3/gk_dk_nobcn32clamp.txt", "r") != nullptr ||
+      std::fopen("sdmc:/switch/jak2/gk_dk_nobcn32clamp.txt", "r") != nullptr;
   uint32_t lvl_w[16], lvl_h[16], lvl_bytes[16];
   uint32_t levels = 0;
   for (uint32_t i = 0; i < mip_n && i < 16; i++) {
     const uint32_t lw = std::max(1u, w >> i), lh = std::max(1u, h >> i);
     if (i > 0 && (lw < 4 || lh < 4)) {
+      break;
+    }
+    if (i > 0 && !s_no_clamp && lh == 32 && lw >= 32) {
       break;
     }
     const uint64_t b = (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes;
@@ -678,6 +689,26 @@ uint64_t free_hole_bytes() { return s_freedBytes; }
 
 uint32_t slot_of(uint32_t id) {
   return id == 0 ? UINT32_MAX : s_store.slot_of(id);
+}
+
+static bool s_desc_invalidate = true;
+uint32_t desc_invalidate_flags() {
+  return s_desc_invalidate ? (DkInvalidateFlags_Descriptors | DkInvalidateFlags_L2Cache) : 0u;
+}
+void set_desc_invalidate(bool on) {
+  s_desc_invalidate = on;
+}
+
+bool describe(uint32_t id, uint32_t* w, uint32_t* h, uint32_t* mips, uint32_t* fmt) {
+  const dktex::Entry* e = id == 0 ? nullptr : s_store.get(id);
+  if (e == nullptr) {
+    return false;
+  }
+  *w = e->w;
+  *h = e->h;
+  *mips = e->mips;
+  *fmt = (uint32_t)e->fmt;
+  return true;
 }
 
 // T82 (AI-assisted): an RGBA8 texture that is also a colour render target (eye textures).

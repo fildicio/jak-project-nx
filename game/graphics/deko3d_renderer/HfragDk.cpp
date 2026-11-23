@@ -716,6 +716,9 @@ void record_world(int fb_w, int fb_h) {
   DkCmdBuf cb = dkdev::cmd_handle();
   const DkGpuAddr data = dkMemBlockGetGpuAddr(dkdev::data_mem());
   dkCmdBufBindImageDescriptorSet(cb, data + dkdev::desc_off() + 0x100, kTexImages);
+  if (const uint32_t inv = dktexgpu::desc_invalidate_flags()) {  // FIX 159
+    dkCmdBufBarrier(cb, DkBarrier_None, inv);
+  }
   dkCmdBufBindSamplerDescriptorSet(cb, data + dkdev::sampler_set_off(),
                                    dkdev::sampler_set_count());
 

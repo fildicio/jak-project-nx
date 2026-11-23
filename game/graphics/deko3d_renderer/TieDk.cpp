@@ -10,6 +10,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/dma/dma_chain_read.h"
@@ -141,6 +142,21 @@ struct IdxSlot {
 };
 IdxSlot s_idx[kIdxSlots];
 uint32_t s_build = 0;
+
+// FIX 158: a tie tree whose GPU vertex buffer never uploaded (the loader's pool acquire
+// failed when the level staged; LoaderStages stores id 0 and never retries) is skipped
+// here forever, silently -- the jak3 Catacombs "tunnel disappears after the first one"
+// symptom. Log each missing tree ONCE per session so gk_run_log.txt names the exact hole.
+void log_missing_vb(const char* level, int geo, size_t t) {
+  static std::unordered_set<std::string> s_logged;
+  char key[96];
+  snprintf(key, sizeof(key), "tie:%s:%d:%zu", level, geo, t);
+  if (s_logged.insert(key).second) {
+    switch_run_logf("[dk] tie tree MISSING GPU vertex buffer: level '%s' geo %d tree %zu"
+                    " -- never uploaded (pool full at load, FIX 158 log)",
+                    level, geo, (unsigned)t);
+  }
+}
 
 IdxSlot* ring_begin() {
   IdxSlot* s = &s_idx[s_build % kIdxSlots];
@@ -509,6 +525,9 @@ void build_frame(Loader* loader) {
       const auto& tree = trees[t];
       const dkpool::PoolBuffer* vb = dk_loader_buffer_find(ld->tie_data[geom][t].vertex_buffer);
       if (vb == nullptr || tree.unpacked.indices.empty()) {
+        if (vb == nullptr && !tree.unpacked.indices.empty()) {
+          log_missing_vb(s_cap[b].pc.level_name, geom, t);
+        }
         continue;
       }
       const uint32_t tod = tod_for(ld, tree, cam.itimes);

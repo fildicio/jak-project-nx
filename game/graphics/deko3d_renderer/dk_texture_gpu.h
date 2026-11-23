@@ -107,6 +107,19 @@ uint64_t free_hole_bytes();  // freed image memory waiting for reuse
 // dkMakeTextureHandle), or UINT32_MAX for 0 / unknown / freed ids.
 uint32_t slot_of(uint32_t id);
 
+// FIX 159 (AI-assisted, J18 black merc): image descriptors are memcpy'd into slots that the
+// LIFO free list hands out again right after a release, and dkCmdBufBindImageDescriptorSet does
+// NOT invalidate the GPU's texture-header cache -> a reused slot can keep sampling the OLD image.
+// Every recorder that binds the descriptor set calls
+// dkCmdBufBarrier(cb, DkBarrier_None, desc_invalidate_flags()) when this is non-zero
+// (DkInvalidateFlags_Descriptors | L2Cache). 0 = opt-out flag sdmc:/switch/<game>/gk_dk_nodescinval.txt.
+uint32_t desc_invalidate_flags();
+void set_desc_invalidate(bool on);
+
+// J18 probe (AI-assisted): what a live id really holds (w, h, mip levels, dktex::Fmt as int).
+// False for 0 / unknown / freed ids.
+bool describe(uint32_t id, uint32_t* w, uint32_t* h, uint32_t* mips, uint32_t* fmt);
+
 // T82 (AI-assisted): w x h RGBA8 image usable as a colour render target AND a sampled
 // texture (eye textures). Returns the id (0 = failed). Render thread only.
 uint32_t create_render_target(uint32_t w, uint32_t h);
