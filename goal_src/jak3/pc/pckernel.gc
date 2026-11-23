@@ -240,6 +240,12 @@
   (set! (-> *setting-control* user-default vibration) (-> obj memcard-vibration?))
   (set! (-> *setting-control* user-default subtitle) (-> obj memcard-subtitles?))
   (set! (-> *setting-control* user-default subtitle-language) (the-as language-enum (-> obj subtitle-language)))
+  ;; FIX 166 (Switch): restore the picture page values into setting-control.
+  ;; user-default is the source of truth: apply-settings copies it into
+  ;; user-target (and then user-current) every frame, and blit-displays reads
+  ;; user-current contrast/brightness for pc-set-brightness-contrast.
+  (set! (-> *setting-control* user-default contrast) (-> obj picture-contrast))
+  (set! (-> *setting-control* user-default brightness) (-> obj picture-brightness))
   obj)
 
 (defmethod set-game-setting! ((obj pc-settings-jak3) (setting symbol) (value symbol))
@@ -664,6 +670,9 @@
     (("hires-clouds?") (set! (-> obj hires-clouds?) (file-stream-read-symbol file)))
     (("text-language") (set! (-> obj text-language) (the-as pc-language (file-stream-read-int file))))
     (("subtitle-language") (set! (-> obj subtitle-language) (the-as pc-language (file-stream-read-int file))))
+    ;; FIX 166 (Switch): picture page persistence (contrast/brightness).
+    (("picture-contrast") (set! (-> obj picture-contrast) (file-stream-read-float file)))
+    (("picture-brightness") (set! (-> obj picture-brightness) (file-stream-read-float file)))
     (("controller-led-status?") (set! (-> obj controller-led-status?) (file-stream-read-symbol file)))
     (("controller-swap-r1-r2?") (set! (-> obj controller-swap-r1-r2?) (file-stream-read-symbol file)))
     (("speedrunner-mode-custom-bind") (set! (-> obj speedrunner-mode-custom-bind) (file-stream-read-int file)))
@@ -723,6 +732,9 @@
   (format file "  (hires-clouds? ~A)~%" (-> obj hires-clouds?))
   (format file "  (text-language ~D)~%" (-> obj text-language))
   (format file "  (subtitle-language ~D)~%" (-> obj subtitle-language))
+  ;; FIX 166 (Switch): picture page persistence (contrast/brightness).
+  (format file "  (picture-contrast ~f)~%" (-> obj picture-contrast))
+  (format file "  (picture-brightness ~f)~%" (-> obj picture-brightness))
   (format file "  (controller-led-status? ~A)~%" (-> obj controller-led-status?))
   (format file "  (controller-swap-r1-r2? ~A)~%" (-> obj controller-swap-r1-r2?))
   (format file "  (speedrunner-mode-custom-bind ~D)~%" (-> obj speedrunner-mode-custom-bind))

@@ -18,6 +18,7 @@
 // context, so add_texture() must hand level textures to dktexgpu instead of GL.
 #include "game/graphics/pipelines/dk_device.h"             // dkdev::is_up()
 #include "game/graphics/deko3d_renderer/dk_texture_gpu.h"  // dktexgpu::upload_rgba8
+#include "game/switch/run_log.h"  // FIX 163: decode lines go to gk_run_log.txt, not stdout
 #endif
 
 #include "common/global_profiler/GlobalProfiler.h"
@@ -620,8 +621,10 @@ u32 fix89_mix(u32 c0, u32 c1, u32 w0, u32 w1, u32 div, u32 a_out) {
  * Decode one BC1 (opaque DXT1, matching GL_COMPRESSED_RGB_S3TC_DXT1_EXT) or BC3
  * mip into tightly packed RGBA8 `dst` (w*h pixels). Edge blocks of non-multiple-
  * of-4 / sub-4x4 mips are clipped. Caller validated the source length.
+ * FIX 163: renamed *_impl (file-local) -- the external fix89_decode_bcn_mip below
+ * forwards here so other TUs (the Merc2 J18 bind probe) can use the same decoder.
  */
-void fix89_decode_bcn_mip(const u8* src, u32 w, u32 h, bool is_bc1, u32* dst) {
+void fix89_decode_bcn_mip_impl(const u8* src, u32 w, u32 h, bool is_bc1, u32* dst) {
   const u32 bw = (w + 3) / 4, bh = (h + 3) / 4;
   for (u32 by = 0; by < bh; by++) {
     for (u32 bx = 0; bx < bw; bx++) {
@@ -739,6 +742,13 @@ void fix89_probe_s3tc_storage() {
       force_off ? " [gk_nodecode.txt]" : (force_on ? " [gk_decode.txt]" : ""));
 }
 }  // namespace
+
+// FIX 163 (AI-assisted, J18): external wrapper around the file-local implementation
+// (which shares the fix89_565/fix89_mix helpers above), so the Merc2 bind probe can
+// decode an fr3 BCn level 0 with EXACTLY the decoder the FIX 162 h64 upload used.
+void fix89_decode_bcn_mip(const u8* src, u32 w, u32 h, bool is_bc1, u32* dst) {
+  fix89_decode_bcn_mip_impl(src, w, h, is_bc1, dst);
+}
 
 void decode_level_bcn_to_rgba(tfrag3::Level& level) {
   static const bool s_disabled = access("sdmc:/gk_nodecode.txt", F_OK) == 0;
@@ -1048,17 +1058,45 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
       const u64 bytes0 = blocks * (is_bc1 ? 8 : 16);
       const bool dk_bcn_game = g_game_version == GameVersion::Jak2 ||
                                g_game_version == GameVersion::Jak3;  // FIX 154: jak3 too
-      if (dk_bcn_game && tex.h == 32 && tex.w >= 32 &&
+      // AI-assisted (jak2 mountain checkerboard, HW 2026-11-11): deko3d 0.5.0 mis-handles
+      // block-compressed images exactly 32 px tall and >= 32 px wide (32x32, 64x32, 128x32:
+      // the GPU samples them as black/white blocks, and the mip chain overwrites level 0).
+      // Decode these few small textures to RGBA8 instead.
+      //
+      // J18 (AI-assisted, HW 2026-11-23 destroyed-interceptor run): also decode 64 px tall
+      // and >= 64 px wide BCn. FIX 161's chain clamp stops those before their 32-tall level
+      // 1, leaving a SINGLE-LEVEL BC3 image -- and the car bodies built from them (intcept-*
+      // 64x64 / 128x64, des-transport-* plates/frames) still sample solid black up close in
+      // that run, while every multi-level BC3 (snake chassis 128x128 m2, wheels 256x256 m3)
+      // and every RGBA8 (the lorez 32-tall workaround) renders correctly. The [merclog]/
+      // [mercprobe] data also killed the fade and light theories (w1=0 on all wreck draws,
+      // healthy dusk lights), leaving the single-level BC3 image as the only suspect.
+      // upload_rgba8_mipped also regenerates the far LODs the clamp removed.
+      // gk_dk_noh64decode.txt = keep 64-tall BCn (A/B back to the broken baseline).
+      static const bool s_no_h64decode =
+          access("sdmc:/switch/jak3/gk_dk_noh64decode.txt", F_OK) == 0 ||
+          access("sdmc:/switch/jak2/gk_dk_noh64decode.txt", F_OK) == 0;
+      const bool decode32 = dk_bcn_game && tex.h == 32 && tex.w >= 32;
+      const bool decode64 = dk_bcn_game && !s_no_h64decode && tex.h == 64 && tex.w >= 64;
+      if ((decode32 || decode64) &&
           !tex.mip_offsets.empty() &&
           u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
-        // AI-assisted (jak2 mountain checkerboard, HW 2026-11-11): deko3d 0.5.0 mis-handles
-        // block-compressed images exactly 32 px tall and >= 32 px wide (32x32, 64x32, 128x32:
-        // the GPU samples them as black/white blocks, and the mip chain overwrites level 0).
-        // Every other size verified OK. Decode these few small textures to RGBA8 instead.
+        // FIX 163 (AI-assisted): both lines below used fmt::print, which only reaches the
+        // nxlink stdout -- gk_run_log.txt showed ZERO "[dk] loader: J18 h64" lines on the
+        // 2026-11-23 verdict boot, making FIX 162 look dead when [mercbind] proved every
+        // h64 texture was decoded (all f0 m7/m8). switch_run_logf lands on the card.
+        static int s_h64_logged = 0;
+        if (decode64 && s_h64_logged < 8) {
+          s_h64_logged++;
+          switch_run_logf("[dk] loader: J18 h64 BCn decoded to RGBA8: %s/%s %ux%u f%u",
+                          tex.debug_tpage_name.c_str(), tex.debug_name.c_str(), (unsigned)tex.w,
+                          (unsigned)tex.h, (unsigned)tex.format);
+        }
         static bool s_rgba_reported = false;
         if (!s_rgba_reported) {
           s_rgba_reported = true;
-          fmt::print("[dk] loader: BCn textures 32 px tall decoded to RGBA8 (deko3d layout bug)\n");
+          switch_run_logf(
+              "[dk] loader: BCn textures 32 px tall decoded to RGBA8 (deko3d layout bug)");
         }
         std::vector<u32> rgba((size_t)tex.w * tex.h);
         fix89_decode_bcn_mip(tex.bcn_data.data() + tex.mip_offsets[0], tex.w, tex.h, is_bc1,

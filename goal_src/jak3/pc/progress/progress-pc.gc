@@ -642,7 +642,9 @@
      (set! (-> this current-options) *sound-options-pc*)
      )
     (('picture-options)
-     (set! (-> this current-options) *picture-options*)
+     ;; FIX 166 (Switch): use the PC page so contrast/brightness persist in
+     ;; pc-settings (the original PS2 page never saved them).
+     (set! (-> this current-options) *picture-options-pc*)
      )
     (('camera-options)
      (set! (-> this current-options) *camera-options-pc*)

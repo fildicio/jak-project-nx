@@ -532,6 +532,11 @@ u64 s_sky_menu_late = 0;
 // jak2-gated (sky_halfres_wants), so a sky that stopped drawing on jak3 (desert "kinda
 // black", 2026-11-20) was invisible in the stats line. Cumulative SKY-bucket draws.
 u64 s_sky_draws = 0;
+// FIX 165 (AI-assisted): provably-empty dkgl buckets skipped whole (see bucket_chain_inert
+// below run_bucket's FIX 146 walker). Cumulative since boot, printed in the [dkgl] ocean
+// census line as `empty skip` -- a healthy mission run should show roughly
+// (s_bucket_count - ~20 live buckets) per frame here.
+u64 s_empty_skips = 0;
 // §7.0 E HW debug (AI-assisted): per-bucket draw/index census. The tie category buckets
 // draw through the shared emitter like everything else; on the 98878af1 HW run bucket 266
 // (ETIE_W_L1_WATER) burned ~15.6 ms/frame of GPU while its plain-water twin 265 (same
@@ -1667,6 +1672,68 @@ const char* bucket_chain_problem(const void* data, u32 slot, u32 next_bucket, u3
   return "too long";
 }
 
+// FIX 165 (AI-assisted): the empty-bucket skip predicate. jak3 runs 322 dkgl buckets a
+// frame and only ~20 carry data; every other one still paid the full GL prologue
+// (begin_bucket + emit_fixed_state's ~8 command-buffer writes + a finished command list + a
+// segment) plus the FIX 146 validation walk plus the renderer's own empty-chain walk.
+// The 2026-11-23 mission census put `dkgl` at 4.4-4.8 ms/frame while the top-10 buckets
+// only sum to ~2.4 -- the rest is this fixed cost spread over ~300 empty buckets.
+// A chain is PROVABLY inert when the walk reaches the next bucket's slot through
+// payload-free tags (qwc == 0, no REF data) whose VIF pairs are all zero: VifCode(0) is
+// NOP, and every renderer action (PC_PORT imms, eye/tex-anim dispatch, ocean/sky/blit
+// captures) is keyed on those VIF codes, so GL itself would have run the renderer and
+// emitted nothing. An inert bucket skips everything except the stale-segment drop and
+// the draws = 0 stamp. The walk carries the same bounds checks as bucket_chain_problem,
+// so a corrupt chain is never mistaken for inert -- the full path reports it as before.
+bool bucket_chain_inert(const void* data, u32 slot, u32 next_bucket) {
+  constexpr u32 kMem = (u32)EE_MAIN_MEM_SIZE;
+  u32 off = slot;
+  u32 stack[2] = {0, 0};
+  int sp = 0;
+  for (int i = 0; i < 16; i++) {  // inert chains are 1-2 tags; 16 is a generous bound
+    if (off == next_bucket) {
+      return true;
+    }
+    if (off < (u32)EE_MAIN_MEM_LOW_PROTECT || off > kMem - 16 || (off & 15)) {
+      return false;  // bad chain: let the full path handle/report it
+    }
+    u64 raw, vif;
+    memcpy(&raw, (const u8*)data + off, 8);
+    memcpy(&vif, (const u8*)data + off + 8, 8);
+    const DmaTag tag(raw);
+    if (tag.spr || tag.qwc != 0 || vif != 0) {
+      return false;  // payload or VIF codes: a renderer may act, take the full path
+    }
+    switch (tag.kind) {
+      case DmaTag::Kind::CNT:
+        if (tag.addr != 0) {
+          return false;
+        }
+        off += 16;  // qwc == 0 here, so the next tag is the following slot
+        break;
+      case DmaTag::Kind::NEXT:
+        off = tag.addr;
+        break;
+      case DmaTag::Kind::CALL:
+        if (sp > 1) {
+          return false;
+        }
+        stack[sp++] = off + 16;  // qwc == 0 here
+        off = tag.addr;
+        break;
+      case DmaTag::Kind::RET:
+        if (sp == 0) {
+          return false;
+        }
+        off = stack[--sp];
+        break;
+      default:  // REF/REFS/REFE/END: references data or ends the chain
+        return false;
+    }
+  }
+  return false;  // longer than any inert chain: treat as non-empty
+}
+
 void log_bad_bucket(const void* data, int bucket, u32 slot, u32 off, u64 tag, const char* why) {
   static int s_logged = 0;
   if (s_logged >= 8) {
@@ -1695,6 +1762,28 @@ void run_bucket(BucketRenderer* r, const void* data, u32 buckets_base, int bucke
   s_cur_bucket = list_idx;
   s_lists[list_idx].segs.clear();
   s_lists[list_idx].valid = false;
+  // FIX 165 (AI-assisted): provably-empty buckets skip the whole GL prologue + validation
+  // walk + renderer run + segment (see bucket_chain_inert above). Excluded:
+  // - the SKY buckets (sky_halfres_wants): the half-res snapshot blit and the FIX 134/135
+  //   menu-mode detectors act BEFORE render, so those buckets must run their prologue even
+  //   when the chain is inert;
+  // - jak3 TEX_HUD_HUD_ALPHA: the FIX 138 color filter runs AFTER render and can act even
+  //   on an inert chain, matching GL (dispatch_buckets_jak3 calls apply_color_filter
+  //   unconditionally after the bucket);
+  // - the pseudo lists (ids >= 1000): never real table slots (their s_renderers stay null,
+  //   so run_bucket is not reached for them -- the guard is defensive only).
+  // begin_bucket dirty-flags ALL state, so every non-empty segment re-emits its own
+  // prologue from scratch: dropping empty segments cannot change what the next dkgl
+  // segment or an interleaved native pass sees.
+  const u32 slot165 = buckets_base + 16 * (u32)bucket;
+  if (bucket < 1000 && !sky_halfres_wants(bucket) &&
+      !(s_bucket_ids == s_jak3_ids && bucket == (int)jak3::BucketId::TEX_HUD_HUD_ALPHA) &&
+      bucket_chain_inert(data, slot165, slot165 + 16)) {
+    s_lists[list_idx].draws = 0;
+    s_empty_skips++;
+    s_cur_bucket = -1;
+    return;
+  }
   begin_bucket();
   s_emitter.bucket_start();
   // OpenGLRenderer::setup_frame: glViewport(0, 0, game_res_w, game_res_h) before dispatch;
@@ -3638,7 +3727,7 @@ void capture_end() {
         "data %u ubo %u | draws %llu skipped %llu inert %llu notex %llu | skip attrib %llu idx %llu ubo %llu int %llu | dma mismatch %llu bad %llu | cmd overflow "
         "%llu | blit bad %llu | eye draws %llu | interleaved %llu | texanim %llu | glow %llu "
         "bad %llu | distort %llu bad %llu | sky halfres %llu fail %llu nodraw %llu menu %llu"
-        " late %llu skydraw %llu fold %llu | revblit %llu | copyback %llu zoomblur %llu slowtime %llu colorfilt %llu | blackout %llu alp %.2f",
+        " late %llu skydraw %llu fold %llu | revblit %llu | copyback %llu zoomblur %llu slowtime %llu colorfilt %llu | blackout %llu alp %.2f | empty skip %llu",
         (unsigned long long)s_captures, (unsigned)s_lists[0].segs.size(),
         (unsigned)s_lists[std::max(
              0,
@@ -3667,7 +3756,8 @@ void capture_end() {
         (unsigned long long)rev_blit_count(),  // FIX 136: A/B engagement readout
         (unsigned long long)s_copyback_frames, (unsigned long long)s_zoomblur_frames,
         (unsigned long long)s_slowtime_frames, (unsigned long long)s_colorfilt_frames,
-        (unsigned long long)s_blackout_frames, (double)s_pmode_alp.load(std::memory_order_relaxed));
+        (unsigned long long)s_blackout_frames, (double)s_pmode_alp.load(std::memory_order_relaxed),
+        (unsigned long long)s_empty_skips);  // FIX 165: empty-bucket skip engagement
     // Row I (AI-assisted): Merc2 per-draw profile (2026-11-16 NEXT), deltas since the
     // previous [dkgl] line: glUniform* calls (brackets = writes that changed shadow
     // bytes; the rest were memcmp'd away for free), GL_UNIFORM_BUFFER glBufferSubData

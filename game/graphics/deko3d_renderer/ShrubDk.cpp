@@ -112,9 +112,18 @@ struct TreeIdxCache {
   uint64_t load_id = ~0ull;
   std::vector<u32> sorted;  // strips regrouped by chunk, each strip ends with a restart index
   std::vector<std::vector<ShrubChunk>> chunks;  // per draw
+  // FIX 164 (AI-assisted, Switch perf): the chunk build is resumable at draw
+  // granularity so a streamed-in tree can never hitch the frame (it used to cost
+  // 20-73 ms inline in build_frame in the wasteland, the max-frame spikes). An
+  // unfinished build keeps load_id unset, so the tree is skipped until it finishes.
+  uint64_t build_load_id = ~0ull;
+  size_t built_draws = 0;
+  double build_ms = 0.0;
 };
 constexpr uint32_t kChunkIdx = 600;
 constexpr u32 kRestart = 0xFFFFFFFFu;
+// FIX 164: per-frame CPU budget (ms) for resumable chunk builds, shared by all trees.
+constexpr double kShrubBuildBudgetMs = 2.5;
 
 bool shrub_cull_enabled() {
 #if defined(__SWITCH__)
@@ -148,18 +157,34 @@ uint32_t morton3(uint32_t x, uint32_t y, uint32_t z) {
   return spread(x) | (spread(y) << 1) | (spread(z) << 2);
 }
 
-void build_shrub_chunks(const tfrag3::ShrubTree& tree, TreeIdxCache* out) {
+// FIX 164 (AI-assisted, Switch perf): the chunk sort used to run all at once the first
+// time a streamed-in tree was seen -- 20-73 ms inline in build_frame in the wasteland
+// (the max-frame spikes while driving). Same chunking as before, but resumable at draw
+// granularity under a per-frame budget shared by every tree: an unfinished build leaves
+// load_id unset, the tree stays invisible a few frames, and no frame eats the whole sort.
+bool build_shrub_chunks_step(const tfrag3::ShrubTree& tree,
+                             uint64_t load_id,
+                             TreeIdxCache* out,
+                             double budget_ms,
+                             double* spent_ms) {
+  if (out->build_load_id != load_id || out->chunks.size() != tree.static_draws.size()) {
+    out->build_load_id = load_id;
+    out->built_draws = 0;
+    out->build_ms = 0.0;
+    out->sorted.clear();
+    out->sorted.reserve(tree.indices.size() + tree.indices.size() / 8);
+    out->chunks.assign(tree.static_draws.size(), {});
+  }
   struct Strip {
     uint32_t start, len;
     float mn[3], mx[3];
     uint32_t key;
   };
   const auto& verts = tree.unpacked.vertices;
-  out->sorted.clear();
-  out->chunks.assign(tree.static_draws.size(), {});
-  out->sorted.reserve(tree.indices.size() + tree.indices.size() / 8);
   std::vector<Strip> strips;
-  for (size_t di = 0; di < tree.static_draws.size(); di++) {
+  const auto t0 = std::chrono::steady_clock::now();
+  while (out->built_draws < tree.static_draws.size()) {
+    const size_t di = out->built_draws;
     const auto& d = tree.static_draws[di];
     const u32* in = tree.indices.data() + d.first_index_index;
     const uint32_t n = d.num_indices;
@@ -236,7 +261,22 @@ void build_shrub_chunks(const tfrag3::ShrubTree& tree, TreeIdxCache* out) {
       c.sphere = math::Vector4f(cx, cy, cz, 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * 1.02f + 16.f);
       dc.push_back(c);
     }
+    out->built_draws++;
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    if (ms >= budget_ms && out->built_draws < tree.static_draws.size()) {
+      out->build_ms += ms;
+      *spent_ms = ms;
+      return false;  // budget used: finish on a later frame, the tree stays invisible
+    }
   }
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+  out->build_ms += ms;
+  *spent_ms = ms;
+  return true;
 }
 std::unordered_map<const void*, TreeIdxCache> s_tree_idx;
 IdxSlot s_idx[kIdxSlots];
@@ -391,6 +431,9 @@ void build_frame(Loader* loader) {
   }
   s_build++;
   IdxSlot* ring = ring_begin();
+  // FIX 164: every first-seen tree this frame draws from this shared build budget; once
+  // it is spent, still-unbuilt trees just wait a frame (no hitch, no 20-73 ms spike).
+  double build_budget = kShrubBuildBudgetMs;
   static std::vector<std::pair<int, int>> groups;
   static std::vector<u32> idx;
 
@@ -453,18 +496,19 @@ void build_frame(Loader* loader) {
       }
       TreeIdxCache& ic = s_tree_idx[&tree];
       if (ic.load_id != ld->load_id || ic.chunks.size() != tree.static_draws.size()) {
-        const auto t0 = std::chrono::steady_clock::now();
-        build_shrub_chunks(tree, &ic);
+        double spent = 0.0;
+        const bool built = build_shrub_chunks_step(tree, ld->load_id, &ic, build_budget, &spent);
+        build_budget -= spent;
+        if (!built) {
+          continue;  // FIX 164: invisible until the build finishes (a few frames), no hitch
+        }
         ic.load_id = ld->load_id;
         size_t nch = 0;
         for (const auto& dc : ic.chunks) {
           nch += dc.size();
         }
         switch_run_logf("[dk] shrub chunks: %zu draws, %zu chunks, %zu idx, built in %.1f ms",
-                        tree.static_draws.size(), nch, ic.sorted.size(),
-                        std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count());
+                        tree.static_draws.size(), nch, ic.sorted.size(), ic.build_ms);
       }
       const bool cull =
           s_jak2_style && shrub_cull_enabled();  // jak1 keeps drawing every chunk

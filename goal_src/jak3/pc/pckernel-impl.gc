@@ -117,6 +117,13 @@
 
    (text-language pc-language) ;; language for game text
    (subtitle-language pc-language)
+
+   ;; FIX 166 (Switch): picture page (contrast/brightness) values. Previously
+   ;; these lived only in *setting-control* -- the original PS2 picture page
+   ;; never saved them, so they reset to 0.5 on every boot.
+   (picture-contrast  float)
+   (picture-brightness float)
+
 	 )
 
   (:methods
@@ -199,6 +206,10 @@
   (set! (-> obj memcard-subtitles?) #f)
   (set! (-> obj hinttitles?) #t)
   (set! (-> obj subtitle-speaker?) 'auto)
+  ;; FIX 166 (Switch): picture page defaults -- match setting-control's own
+  ;; defaults (settings.gc reset: brightness 0.5 / contrast 0.5).
+  (set! (-> obj picture-contrast) 0.5)
+  (set! (-> obj picture-brightness) 0.5)
   0)
 
 (define-extern reset-speedrunner-mode-hm-secrets! (function pc-settings-jak3 none))

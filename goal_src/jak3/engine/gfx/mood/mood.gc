@@ -1513,6 +1513,14 @@
                   )
                 )
               )
+          ;; FIX 129 (Switch): one-shot diagnostic -- prints once per cheat
+          ;; state CHANGE so a HW run proves the mood process consumed the
+          ;; toggle (0 = none / 1 = weather-bad / 2 = weather-good). If a
+          ;; toggle never produces this line, the cheat died before mood.
+          (when (!= new-cheat-state (-> this weather-cheat-state))
+            (format 0 "[FIX129] weather cheat state ~D -> ~D~%"
+                    (-> this weather-cheat-state) new-cheat-state)
+            )
           (when (and (!= new-cheat-state (-> this weather-cheat-state))
                      (zero? new-cheat-state)
                      )

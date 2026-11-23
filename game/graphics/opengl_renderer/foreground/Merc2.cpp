@@ -701,12 +701,14 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
     if (s_lines < 6000 && (s_calls[hash]++ % 120) == 0) {
       s_lines++;
       const auto& L = current_lights;
-      switch_run_logf("[merclog] %s amb=%.2f,%.2f,%.2f c0=%.2f,%.2f,%.2f c1=%.2f,%.2f,%.2f "
-                      "c2=%.2f,%.2f,%.2f d0=%.2f,%.2f,%.2f",
-                      model->name.c_str(), L.ambient.x(), L.ambient.y(), L.ambient.z(),
-                      L.color0.x(), L.color0.y(), L.color0.z(), L.color1.x(), L.color1.y(),
-                      L.color1.z(), L.color2.x(), L.color2.y(), L.color2.z(), L.direction0.x(),
-                      L.direction0.y(), L.direction0.z());
+      // J18 (AI-assisted): w1/w2 added -- the sink/despawn fade state was never captured
+      // ([mercprobe] only fires at spawn, where w1=0 for cars).
+      switch_run_logf("[merclog] %s w1=%u w2=%u amb=%.2f,%.2f,%.2f c0=%.2f,%.2f,%.2f "
+                      "c1=%.2f,%.2f,%.2f c2=%.2f,%.2f,%.2f d0=%.2f,%.2f,%.2f",
+                      model->name.c_str(), (unsigned)L.w1, (unsigned)L.w2, L.ambient.x(),
+                      L.ambient.y(), L.ambient.z(), L.color0.x(), L.color0.y(), L.color0.z(),
+                      L.color1.x(), L.color1.y(), L.color1.z(), L.color2.x(), L.color2.y(),
+                      L.color2.z(), L.direction0.x(), L.direction0.y(), L.direction0.z());
     }
   }
 #endif
@@ -1306,6 +1308,12 @@ void Merc2::flush_draw_buckets(SharedRenderState* render_state,
 }
 
 #if defined(__SWITCH__)
+// FIX 163 (AI-assisted, J18): defined in loader/LoaderStages.cpp -- the same BCn decoder
+// the FIX 162 h64 path used to upload these very textures as RGBA8. Global scope on
+// purpose: a block-scope declaration inside the anonymous namespace below would denote a
+// different, never-defined (anonymous)::fix89_decode_bcn_mip and fail to link.
+void fix89_decode_bcn_mip(const u8* src, u32 w, u32 h, bool is_bc1, u32* dst);
+
 namespace {
 // J18 bind probe (AI-assisted): black merc (jak3 cars, jak2 breakable walls) samples black RGB
 // with the model's own texture id. Log what the bound dk id really is at DRAW time: alive or
@@ -1341,6 +1349,57 @@ void merc_bind_probe(const LevelData* lev, int ti) {
                   (int)alive, w, h, mips, fmt, t ? t->debug_tpage_name.c_str() : "?",
                   t ? t->debug_name.c_str() : "?", t ? t->w : 0, t ? t->h : 0,
                   t ? (unsigned)t->format : 0, mismatch ? " MISMATCH" : "");
+
+  // FIX 163 (AI-assisted, J18 content probe): FIX 162 put these textures on the GPU as
+  // RGBA8 (f0 m7/m8 in every [mercbind] line of the 2026-11-23 boot) and the cars STILL
+  // sample black, so log what the level-0 content actually is, once per id: overall mean
+  // RGB ("the decode is black"), border mean ("UV overrun samples a black tpage edge")
+  // and texel 0. Runs off the fr3 payload, needs nothing from the GPU.
+  static std::unordered_map<u32, u32> s_rgb_done;
+  if (t && s_rgb_done.insert({id, 1}).second) {
+    const u32 pw = t->w, ph = t->h;
+    const u32* px = nullptr;
+    std::vector<u32> rgba;
+    const u64 blocks = u64((pw + 3) / 4) * ((ph + 3) / 4);
+    if (t->format == tfrag3::TEXTURE_FMT_RGBA && t->data.size() >= (size_t)pw * ph) {
+      px = t->data.data();
+    } else if ((t->format == tfrag3::TEXTURE_FMT_BC1 ||
+                t->format == tfrag3::TEXTURE_FMT_BC3) &&
+               !t->mip_offsets.empty() &&
+               u64(t->mip_offsets[0]) + blocks * (t->format == tfrag3::TEXTURE_FMT_BC1 ? 8 : 16) <=
+                   t->bcn_data.size()) {
+      rgba.resize((size_t)pw * ph);
+      fix89_decode_bcn_mip(t->bcn_data.data() + t->mip_offsets[0], pw, ph,
+                           t->format == tfrag3::TEXTURE_FMT_BC1, rgba.data());
+      px = rgba.data();
+    }
+    if (px && pw && ph) {
+      double mr = 0, mg = 0, mb = 0;  // all-pixel sums (data words are 0xAABBGGRR)
+      double br = 0, bg = 0, bb = 0;  // border-pixel sums
+      u64 n = 0, bn = 0;
+      for (u32 y = 0; y < ph; y++) {
+        for (u32 x = 0; x < pw; x++) {
+          const u32 p = px[(size_t)y * pw + x];
+          const u32 r = p & 0xff, g = (p >> 8) & 0xff, b = (p >> 16) & 0xff;
+          mr += r;
+          mg += g;
+          mb += b;
+          n++;
+          if (x == 0 || y == 0 || x + 1 == pw || y + 1 == ph) {
+            br += r;
+            bg += g;
+            bb += b;
+            bn++;
+          }
+        }
+      }
+      switch_run_logf("[mercrgb] id=%u %s/%s f%u mean=%u,%u,%u border=%u,%u,%u tex0=%08x",
+                      (unsigned)id, t->debug_tpage_name.c_str(), t->debug_name.c_str(),
+                      (unsigned)t->format, (unsigned)(mr / n), (unsigned)(mg / n),
+                      (unsigned)(mb / n), (unsigned)(br / bn), (unsigned)(bg / bn),
+                      (unsigned)(bb / bn), px[0]);
+    }
+  }
 }
 }  // namespace
 #endif
@@ -1494,6 +1553,33 @@ void Merc2::do_draws(const Draw* draw_array,
     }
 
     if (m_lights_buffer[draw.light_idx].w1 && !set_fade) {
+#if defined(__SWITCH__)
+      // J18 fade probe (AI-assisted): every captured [mercprobe] line is spawn-time w1=0, so
+      // the two-pass fade path has NEVER been observed on hardware. Log when a model actually
+      // enters it (event + fade-value change detection, keyed on the model hash) so the next
+      // SD trip shows whether the black car is mid-fade (w1!=0) or in a plain dead-state draw.
+      {
+        static const bool s_fade_log =
+            std::fopen("sdmc:/switch/jak3/gk_dkgl_merclog.txt", "r") != nullptr ||
+            std::fopen("sdmc:/switch/jak2/gk_dkgl_merclog.txt", "r") != nullptr;
+        static std::unordered_map<u64, float> s_fade_seen;
+        static u32 s_fade_lines = 0;
+        if (s_fade_log && s_fade_lines < 1500) {
+          const float fade = m_lights_buffer[draw.light_idx].w2 / 128.f;
+          auto it = s_fade_seen.find(draw.hash);
+          if (it == s_fade_seen.end() || it->second - fade > 0.05f ||
+              fade - it->second > 0.05f) {
+            s_fade_seen[draw.hash] = fade;
+            s_fade_lines++;
+            switch_run_logf("[mercfade] hash=%llx lev=%s w1=%u w2=%u fade=%.3f",
+                            (unsigned long long)draw.hash,
+                            lev->level ? lev->level->level_name.c_str() : "?",
+                            (unsigned)m_lights_buffer[draw.light_idx].w1,
+                            (unsigned)m_lights_buffer[draw.light_idx].w2, (double)fade);
+          }
+        }
+      }
+#endif
       DrawMode mode = draw.mode;
       mode.set_alpha_blend(DrawMode::AlphaBlend::SRC_DST_SRC_DST);
       mode.set_ab(true);

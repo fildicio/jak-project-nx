@@ -3305,3 +3305,144 @@ rest should be there; log should show no `[pool] ... FAILED` during comb, no
 PASS incl. EL0 audit; host dk tests 24/24 PASS, dk-lint PASS). jak2 NRO not
 rebuilt yet — FIX 158 affects it too, rebuild at the next jak2 test. SD deploy
 is a human step (AGENT_KNOWLEDGE_MAP §12).
+
+## 2026-11-23 (night 3, post-verdict) — FIX 165 dkgl capture-walk perf: empty-bucket skip (AI-assisted)
+
+**Context:** the J18 night-3 mission census named the dkgl capture walk as the
+next perf lever: `capture 6.6-7.2 ms/frame`, of which `dkgl 4.4-4.8` — but the
+top-10 buckets (b402 0.62 / b6 0.58-0.72 / b5 0.27 / b579 0.19 / b357 0.15 …)
+only sum to ~2.4. The missing ~2 ms is per-bucket FIXED cost: jak3 registers
+**322 dkgl buckets** and only ~20 carry data, yet every one paid
+`begin_bucket` + `emit_fixed_state` (~8 command-buffer writes) +
+`dkCmdBufFinishList` + a segment push + the FIX 146 validation walk + the
+renderer's own empty-chain walk.
+
+**Fix (`dkgl_frame.cpp`, FIX 165):** `bucket_chain_inert()` — a bounded walk
+with the same bounds checks as the FIX 146 walker. A chain is PROVABLY inert
+when it reaches the next bucket slot through payload-free tags (`qwc == 0`, no
+REF) whose VIF pairs are all zero: `VifCode(0)` is NOP and every renderer
+action (PC_PORT imms, eye/tex-anim dispatch, ocean/sky/blit captures) is keyed
+on those VIF codes — GL itself would have run the renderer and emitted
+nothing. Inert buckets keep only the stale-segment drop + `draws = 0` stamp
+(eye-barrier accounting unchanged). Never skipped: the SKY buckets (half-res
+snapshot + FIX 134/135 menu detectors act BEFORE render) and jak3
+`TEX_HUD_HUD_ALPHA` (FIX 138 color filter acts AFTER render even on an inert
+chain, matching GL dispatch). `begin_bucket` dirty-flags all state, so every
+non-empty segment re-emits its own prologue — dropping empty segments cannot
+change what the next dkgl segment or an interleaved native pass sees. If real
+"empty" chains turn out to carry nonzero vif quads, the predicate just returns
+false: no behavior change, no win, and the census counter says so.
+
+**Engagement readout:** `empty skip N` appended to the `[dkgl] ocean` census
+line — a mission run should show ~280-300 per frame. Expect `dkgl` ≈ 2.8-3.4
+ms (−1 to −2 render-thread ms/frame → direct fps in the cpu-bound slow
+windows). Watch `dma mismatch 0`, `bad 0` stay flat. Zero visual delta by
+construction. Doc row: JAK3_BRINGUP_TODO.md J20.
+
+**Built:** jak3 NRO `d47a158405e6b604b596bad92c7e7777`, jak2 NRO
+`b82bb7dbd61517eb079b8faa18be50f3` (both ai-gate PASS incl. EL0 audit,
+dk-lint PASS; the file is shared, so both games rebuilt in one pass). SD
+deploy is a human step (AGENT_KNOWLEDGE_MAP §12) — card was not mounted at
+build time.
+
+**Deployed 2026-11-23 (AI-assisted):** both NROs copied to the card, md5
+verified in place; old builds rotated to `jak3.nro.bak-pre-fix165`
+(`baec793f`) / `jak2.nro.bak-pre-fix165` (`0a07eb59`); `sync` done. Probe
+flag state left EXACTLY as the baseline run (merclog/blitprobe are
+event-driven, ~9 lines/s, negligible; `gk_dkdump.txt` frame-4200 kept so the
+next run drops a fresh `dk_replay.golden` for a regression diff).
+
+**Pre-165 baseline (19:47 session, NRO `baec793f`, archived
+`hw-logs/jak3-run-pre-fix165-1947.txt`):** `dkgl` avg **4.23 / max 6.32 ms**
+(36 census samples, gameplay phase), cpu-slow ~38/600 frames per 10 s window,
+world GPU pass 10.4 ms avg. That session had **0 pool acquire failures and
+0 hitches >10 ms** — the two 240/293 ms hitches did NOT reproduce. Verdict
+check for the next run: `empty skip` ≈ 280-300/frame in the `[dkgl] ocean`
+line, `dkgl` ≈ 2.8-3.4 ms, cpu-slow counts down, `dma mismatch 0` / `bad 0`
+flat, frame-4200 golden diff ≈ identical minus the skipped empties.
+
+Night-3 comb mission log recovered from the appended card
+`gk_run_log.txt` (session starting at line 109998, ends `[1327]` with the
+`[pf] idle ... failed allocation` signature) →
+`hw-logs/jak3-run-night3-mission-recovered.txt`. NOTE: the card
+`gk_run_log.txt` is APPENDED across sessions (~28 in the file) — always
+split on `[0.000] session start` before comparing runs.
+
+**FIX 165 HW VERDICT (user run, 2026-11-23 ~20:16 session, NRO `d47a1584`):
+PASS, better than predicted.** Last session (split at line 251737): `dkgl`
+avg **2.16 / max 3.23 ms** (baseline 4.23/6.32, predicted 2.8-3.4),
+`dma mismatch 0` / `bad 0` / no bad-chain lines, empty skips ~
+**303/frame** (first window: 60 frames / 18203), no pool failures, golden
+`dk_replay.golden.txt` regenerated 20:12 for a free future diff. J20 can go
+green; next perf lever is the GPU world pass (J21 candidate).
+
+---
+
+## 2026-11-23 (post-165) — FIX 166: jak3 picture-page persistence + weather-cheat diagnostic (AI-assisted, Cline)
+
+**User reports (same session):** (a) "image settings changes don't work —
+when you change it, it doesn't save"; (b) "the bad weather cheat doesn't
+work i think"; (c) "check again if the language gets changed properly".
+
+**(a) Picture page — root cause found and fixed.** Options → Picture
+(contrast/brightness) was the ONLY options page still using the untouched
+PS2 page (`*picture-options*`, engine/ui/progress/progress-static.gc:409):
+its sliders write straight into `*setting-control*` (raw offsets 0x98c/
+0x990) with no `pc-settings-save` anywhere, and `pc-settings` had no
+contrast/brightness fields at all → reset to 0.5 on every boot. The live
+effect was always fine (blit-displays → `pc-set-brightness-contrast` →
+dk PCRTC shader pass). Fix (FIX 166):
+- `pckernel-impl.gc`: new `pc-settings-jak3` fields `picture-contrast` /
+  `picture-brightness` (float), defaults 0.5/0.5 in `reset-misc`.
+- `pckernel.gc`: parse cases + write lines (strictly sequential parser —
+  reader and writer must ship together; old files without the keys just
+  keep the defaults); `initialize` pushes them into
+  `*setting-control* user-default contrast/brightness` after
+  `load-settings` (user-default propagates to user-target/user-current
+  per frame via `apply-settings`).
+- `progress-static-pc.gc`: new `*picture-options-pc*` scrolling page (two
+  `menu-generic-slider-option`s bound to the pc-settings fields,
+  `pc-settings-save` on confirm, mirroring the sound page).
+- `progress-pc.gc:645`: `picture-options` state now dispatches to the -pc
+  page.
+**Build:** GOAL arm64 `make-group "iso"` 1164 targets 0 errors, GAME.CGO
+`f8c67afc…` → **`fbaf636fd231bb574898bf4885d1e770`**, deterministic
+(rebuild byte-identical). Only GAME.CGO changed (DGOs relinked
+byte-identical; full md5 diff vs card = 1 file).
+**Deployed:** card `data/out/jak3/iso/GAME.CGO` = `fbaf636f…` verified,
+old rotated to `GAME.CGO.bakf8c67afc-pre166`, `._*` purged, `sync`.
+**HW test:** Options → Picture, move both sliders, confirm, reboot →
+values stay; `pc-settings.gc` gains `(picture-contrast …)` /
+`(picture-brightness …)` lines.
+
+**(b) Bad Weather cheat — statically HEALTHY, diagnostic added.** The full
+chain is in the deployed build and re-verified this session: debug-menu
+flag (bit 17/18, `default-menu.gc:3446-7`), FIX 127/128 toggle-persist +
+mutual exclusion, FIX 129-jak3 per-frame mood consumption
+(`mood.gc:1494+`, runs from `update-time-of-day` → `init-weather!` every
+frame), card GAME.CGO matched the tree. Card `pc-settings.gc` shows
+`cheats #x0` and the run log only ONE pc-settings write (t=16.2 s) —
+either the user toggled it back off, or the toggle never visibly changed
+their location. Likely visibility trap: the desert sandstorm and mission
+weather are SCRIPTED (`overide-weather-flag` takes priority in the render
+path) — the cheat only drives the natural cloud/fog/rain system, so test
+in a normal exterior (Haven City). Added a one-shot diagnostic in the
+FIX-129 block (`mood.gc`): `[FIX129] weather cheat state X -> Y` prints
+once per cheat-state change — the next run gives a definitive verdict on
+whether the mood process consumes the toggle.
+**HW test:** Haven City exterior → OpenGOAL Cheats → weather-bad ON →
+storm clouds + rain + lightning within ~1 s; log line `[FIX129] weather
+cheat state 0 -> 1`; OFF → back to normal (`-> 0`), reboot → persists.
+
+**(c) Language — verified working, nothing to fix.** Card settings show
+`game-language 4 / text-language 4 / subtitle-language 4` (Italian,
+persisted); `VAGWAD.ITA` + `4COMMON.TXT` present on the card iso; FIX 156's
+live `(set-language lang)` is in the deployed build and the overlord maps
+`languages[4] = "ITA"`. Expectations: **Speech Language switches live from
+the next spoken line** (FIX 156); **Subtitle Language is live** (read at
+subtitle draw time); **Text Language is restart-only** — upstream
+limitation, ND's own code comment (the on-confirm
+`load-level-text-files` reload "doesn't actually work",
+progress-static-pc.gc:532). If text didn't change mid-session, that is by
+design; it applies on the next boot.
+
