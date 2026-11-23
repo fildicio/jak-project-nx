@@ -748,7 +748,19 @@ void decode_level_bcn_to_rgba(tfrag3::Level& level) {
   // AI-assisted: on the deko3d path BCn goes to the GPU compressed (dktexgpu::upload_bcn,
   // 4-8x less memory). Decoding to RGBA8 here filled the 96 MB image pool on big levels
   // (Atoll: "tex pool full", ground/grass textures refused -> drawn untextured).
-  if (dkdev::is_up() && g_game_version == GameVersion::Jak2) {
+  // FIX 154 (AI-assisted, 2026-11-23): same for jak3 -- it still paid the FIX 91 CPU
+  // decode (300-700+ textures per level, 31-48 ms loader bursts) plus 4-8x VRAM and
+  // sampling bandwidth, while the jak3 GPU limit is tie/tfrag texture sampling
+  // (pools 414 MB, image-pool pressure). gk_nodecode.txt still restores the CPU
+  // decode for a hardware A/B (the upload path then sees RGBA and skips the BCn
+  // branch, so the A/B is now safe -- see the FIX 154 note in CLINE_HANDOFF.md).
+  if (dkdev::is_up() &&
+      (g_game_version == GameVersion::Jak2 || g_game_version == GameVersion::Jak3)) {
+    static bool s_jak3_reported = false;
+    if (!s_jak3_reported && g_game_version == GameVersion::Jak3) {
+      s_jak3_reported = true;
+      fmt::print("[texfmt] FIX 154 jak3 dk path: BCn kept compressed (no CPU decode)\n");
+    }
     return;
   }
   Timer t;
@@ -1034,7 +1046,9 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
       const bool is_bc1 = tex.format == tfrag3::TEXTURE_FMT_BC1;
       const u64 blocks = u64((tex.w + 3) / 4) * ((tex.h + 3) / 4);
       const u64 bytes0 = blocks * (is_bc1 ? 8 : 16);
-      if (g_game_version == GameVersion::Jak2 && tex.h == 32 && tex.w >= 32 &&
+      const bool dk_bcn_game = g_game_version == GameVersion::Jak2 ||
+                               g_game_version == GameVersion::Jak3;  // FIX 154: jak3 too
+      if (dk_bcn_game && tex.h == 32 && tex.w >= 32 &&
           !tex.mip_offsets.empty() &&
           u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
         // AI-assisted (jak2 mountain checkerboard, HW 2026-11-11): deko3d 0.5.0 mis-handles
@@ -1050,7 +1064,7 @@ u64 add_texture(TexturePool& pool, const tfrag3::Texture& tex, bool is_common) {
         fix89_decode_bcn_mip(tex.bcn_data.data() + tex.mip_offsets[0], tex.w, tex.h, is_bc1,
                              rgba.data());
         dk_tex = dktexgpu::upload_rgba8_mipped(tex.w, tex.h, rgba.data());
-      } else if (g_game_version == GameVersion::Jak2 && tex.w != 0 && tex.h != 0 &&
+      } else if (dk_bcn_game && tex.w != 0 && tex.h != 0 &&
           !tex.mip_offsets.empty() &&
           u64(tex.mip_offsets[0]) + bytes0 <= tex.bcn_data.size()) {
         dk_tex = dktexgpu::upload_bcn_mipped(

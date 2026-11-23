@@ -3022,3 +3022,54 @@ The user ran the deployed build in the desert. Results, in reading order:
   `[dkgl] FIX146 bad dma bucket ...` + raw quads around the tag (to find what overwrites it).
 - Card: `jak3.nro md5 ba73038b2fb9db5966fb14115ff497df` (backup `jak3.nro.bak632aeeb8-fix145`, logs `*.fix145run`;
   copies in `hw-logs/jak3-crash-20261119-1143/`).
+
+## 2026-11-23 jak3 perf review + FIX 154 — BCn kept compressed on the jak3 dk path (AI-assisted)
+
+Parallel-agent coordination note: this session's change (FIX 154) touches ONLY
+`game/graphics/opengl_renderer/loader/LoaderStages.cpp` (3 gates + 1 log line) and
+docs — no overlap with the FIX 136-146 files, no baseline change for any 🟡 task.
+Full review with ranked recommendations:
+`docs/deko3d/jak3-perf-review-20261123.md` (sources: Nov-20 run `jak3.nro
+3455b421`, Nov-19 fix152 session).
+
+- Root cause found for the jak3 loader hitches + 414 MB pools: the compressed-BCn
+  upload path was gated `GameVersion::Jak2` in THREE places, so jak3 CPU-decoded
+  every BCn level texture to RGBA (FIX 91 path, 326-738 textures per burst,
+  31-48 ms) and paid 4-8x VRAM + sampling bandwidth — while the GPU limit is
+  tie/tfrag texture sampling.
+- FIX 154: `decode_level_bcn_to_rgba` early-return (dk path) now covers Jak3;
+  both upload gates (32-px-tall deko3d layout-bug RGBA8 fallback +
+  `dktexgpu::upload_bcn_mipped` with the level-0 fallback) now cover Jak3 via
+  `dk_bcn_game`. One-shot log: `[texfmt] FIX 154 jak3 dk path: BCn kept
+  compressed (no CPU decode)`.
+- `gk_nodecode.txt` is now a SAFE jak3 A/B (with the flag the CPU decode runs and
+  the upload sees RGBA — previously it produced "malformed BCn skipped" and an
+  untextured world, so it was NOT a valid A/B before this fix).
+- Jak1 and the desktop/GL paths unchanged (all gates are `dkdev::is_up()`-guarded).
+- dk-lint PASS. check-switch.sh jak3 + NRO deploy: see the card line below.
+- Card (2026-11-23): `jak3.nro md5 e358bbfaae3fca55b5c3d40c42381b62` (build
+  `PASS: jak3 nro=build-switch-jak3/game/gk.nro`; previous card build
+  `234c86bf` rotated to `jak3.nro.bak234c86bf-fix153`).
+
+HW retest reading order (jak3, one run):
+1. `[texfmt] FIX 154 jak3 dk path: BCn kept compressed` once at boot (positive
+   confirmation the gate took).
+2. `[dk] loader: BCn textures 32 px tall decoded to RGBA8 (deko3d layout bug)`
+   may fire for jak3 — that's the layout-bug fallback doing its job, expected.
+   Visual regression to watch: mountains/strip textures sampled as b/w
+   checkerboard (the HW 2026-11-11 jak2 bug class; any new size beyond 32-px
+   would mean the layout bug has more cases — report the exact WxH).
+3. World fully textured (biggest regression risk); then perf: `stage texture`
+   loses the 31-48 ms decode bursts, `slow setup` should drop under the 8 ms
+   budget, `pools` should shrink well under 414 MB, `[dk] tex live=` and
+   image-pool pressure drop.
+4. Optional A/B: drop `gk_nodecode.txt` on the card to restore the CPU decode
+   for one run and compare loader `slow setup` / `stage texture` lines.
+
+Next perf work (from the review, ranked): (2) loader hitch spread if
+`slow setup` stays > 8 ms; (3) b570 PARTICLES 1.2-3.7 ms — consider a lower
+jak3 `set_near_fade` threshold and extending the sprite fade to mode-3 beams;
+(4) EE-bound scenes: GOAL profiler (FIX 150 is in) in one such scene;
+(5) log hygiene: buffer/trim `[RpcSync]`/`[sceOpen]` spam + the 12 MB
+`gk_run_log.txt` written to FAT32 during gameplay.
+
