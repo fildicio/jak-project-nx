@@ -122,6 +122,17 @@ bool shrub_cull_enabled() {
 #endif
 }
 
+// #b (AI-assisted, Switch perf): distance/fog cull on top of the frustum cull.
+// sdmc:/gk_noshrubdistcull.txt draws every frustum-visible chunk (A/B on HW).
+bool shrub_dist_cull_enabled() {
+#if defined(__SWITCH__)
+  static const bool s_on = access("sdmc:/gk_noshrubdistcull.txt", F_OK) != 0;
+  return s_on;
+#else
+  return true;
+#endif
+}
+
 uint32_t morton3(uint32_t x, uint32_t y, uint32_t z) {
   auto spread = [](uint32_t v) {
     v &= 0x3ff;
@@ -385,6 +396,30 @@ void build_frame(Loader* loader) {
     cp.fog = cam.fog;
     s_frame.cams.push_back(cp);
 
+    // #b (AI-assisted, Switch perf): distance/fog cull inputs, same math as
+    // shrub.vert. A vertex's fogginess saturates (max fog) exactly when
+    // f = W + hvdf_off.w <= fog_min, with W = pc_camera w-row applied to
+    // (position - cam_trans) -- f is affine, so the NEAREST vertex of a chunk
+    // decides and the bounding sphere bounds it precisely. A fully-fogged chunk
+    // can only paint solid fog_color, like the fully-fogged tfrag/tie that still
+    // draw, so skipping it is invisible unless the level's fog never saturates:
+    // the fog_min <= 8 guard (>= 97% mix) keeps no-fog levels drawing everything.
+    const float fw0 = cp.pc_camera[0].w();
+    const float fw1 = cp.pc_camera[1].w();
+    const float fw2 = cp.pc_camera[2].w();
+    const float fw3 = cp.pc_camera[3].w();
+    const float grad_w = std::sqrt(fw0 * fw0 + fw1 * fw1 + fw2 * fw2);
+    const float fog_min = cp.fog.y();
+    const float hvdf_w = cp.hvdf_off.w();
+    const bool fog_cull = s_jak2_style && shrub_cull_enabled() && shrub_dist_cull_enabled() &&
+                          fog_min <= 8.f && grad_w > 1e-6f;
+    static float s_logged_fog = -1e30f;
+    if (fog_cull && fog_min != s_logged_fog) {
+      switch_run_logf("[dk] shrub fog cull ON (fog_min %.0f, fog_off %.0f, grad %.3f)",
+                      fog_min, hvdf_w, grad_w);
+      s_logged_fog = fog_min;
+    }
+
     const auto& trees = ld->level->shrub_trees;
     for (size_t t = 0; t < trees.size() && t < ld->shrub_vertex_data.size(); t++) {
       const auto& tree = trees[t];
@@ -421,7 +456,18 @@ void build_frame(Loader* loader) {
       for (size_t di = 0; di < tree.static_draws.size(); di++) {
         const uint32_t first = n;
         for (const ShrubChunk& c : ic.chunks[di]) {
-          if (!cull || sphere_in_view_ref(c.sphere, cam.planes)) {
+          bool keep = !cull || sphere_in_view_ref(c.sphere, cam.planes);
+          if (keep && fog_cull) {
+            // max f over the chunk = f(center) + r * |grad f|: past fog saturation,
+            // every vertex is max-fogged, so the chunk cannot be seen. Cull it.
+            const float dx = c.sphere.x() - cp.trans.x();
+            const float dy = c.sphere.y() - cp.trans.y();
+            const float dz = c.sphere.z() - cp.trans.z();
+            const float f = hvdf_w + fw3 + fw0 * dx + fw1 * dy + fw2 * dz +
+                            c.sphere.w() * grad_w;
+            keep = f > fog_min;
+          }
+          if (keep) {
             memcpy(&idx[n], &ic.sorted[c.begin], c.count * sizeof(u32));
             n += c.count;
           }

@@ -9,7 +9,10 @@
 #include "game/graphics/opengl_renderer/background/background_common.h"
 
 #if defined(__SWITCH__)
+#include <unordered_set>
+
 #include "game/switch/imgui_stub.h"
+#include "game/switch/run_log.h"
 #else
 #include "third-party/imgui/imgui.h"
 #endif
@@ -628,6 +631,64 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
 
   u64 hash = fnv64(model->name);
 
+#if defined(__SWITCH__)
+  // J18 probe (AI-assisted): black merc props (jak3 wasteland cars/posts, jak2 breakable
+  // walls). One line per model name: lights + the first textures it binds, so one SD trip
+  // tells "black texture" from "black lighting". gk_dkgl_mercnotex.txt draws merc with
+  // vertex lighting only (no texture) for the A/B.
+  static const bool s_merc_notex =
+      std::fopen("sdmc:/switch/jak3/gk_dkgl_mercnotex.txt", "r") != nullptr ||
+      std::fopen("sdmc:/switch/jak2/gk_dkgl_mercnotex.txt", "r") != nullptr;
+  {
+    static std::unordered_set<u64> s_probed;
+    if (s_probed.size() < 600 && s_probed.insert(hash).second) {
+      const auto& a = current_lights.ambient;
+      const auto& c0 = current_lights.color0;
+      std::string texs;
+      int shown = 0;
+      for (const auto& e : model->effects) {
+        for (const auto& d : e.all_draws) {
+          if (shown >= 3 || d.eye_id != 0xff) {
+            continue;
+          }
+          shown++;
+          const int ti = d.tree_tex_id;
+          char buf[200];
+          if (ti >= 0 && ti < (int)lev->textures.size() && lev->level &&
+              ti < (int)lev->level->textures.size()) {
+            const auto& t = lev->level->textures[ti];
+            u32 mean[3] = {0, 0, 0};
+            if (t.format == tfrag3::TEXTURE_FMT_RGBA && (size_t)t.w * t.h * 4 <= t.data.size() &&
+                t.w * t.h > 0) {
+              const u8* px = (const u8*)t.data.data();
+              for (size_t p = 0; p < (size_t)t.w * t.h; p++) {
+                for (int c = 0; c < 3; c++) {
+                  mean[c] += px[p * 4 + c];
+                }
+              }
+              for (int c = 0; c < 3; c++) {
+                mean[c] /= (u32)(t.w * t.h);
+              }
+            }
+            snprintf(buf, sizeof(buf), " [t%d id=%u %s/%s %ux%u f%u data=%zu rgb=%u,%u,%u]", ti,
+                     (unsigned)lev->textures[ti], t.debug_tpage_name.c_str(),
+                     t.debug_name.c_str(), t.w, t.h, (unsigned)t.format, t.data.size(), mean[0],
+                     mean[1], mean[2]);
+          } else {
+            snprintf(buf, sizeof(buf), " [t%d OUT-OF-RANGE n=%zu]", ti, lev->textures.size());
+          }
+          texs += buf;
+        }
+      }
+      switch_run_logf("[mercprobe] %s lev=%s bits=%u w1=%u amb=%.2f,%.2f,%.2f,%.2f "
+                      "c0=%.2f,%.2f,%.2f%s",
+                      model->name.c_str(), lev->level ? lev->level->level_name.c_str() : "?",
+                      (unsigned)flags->bitflags, (unsigned)current_lights.w1, a.x(), a.y(), a.z(),
+                      a.w(), c0.x(), c0.y(), c0.z(), texs.c_str());
+    }
+  }
+#endif
+
   DrawArgs args;
   args.lev_bucket = lev_bucket;
   args.jak1_water_mode = uses_water;
@@ -636,6 +697,9 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
   args.lights = lights;
   args.first_bone = first_bone;
   args.no_texture = render_state->version == GameVersion::Jak3 && model_no_texture;
+#if defined(__SWITCH__)
+  args.no_texture = args.no_texture || s_merc_notex;
+#endif
 
   // loop over effects, creating draws for each
   for (size_t ei = 0; ei < model->effects.size(); ei++) {

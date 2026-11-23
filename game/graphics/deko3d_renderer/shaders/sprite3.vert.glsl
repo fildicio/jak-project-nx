@@ -91,6 +91,31 @@ void main() {
   if (rendermode == 3u) {
     mat3 rot = sprite_quat_to_rot(quat);
     transformed = sprite_transform2(position, xyz_array[vert_id], rot, sx, sy);
+    // #17b (AI-assisted, Switch perf): the #17 near-camera fade, for the mode-3 3D
+    // billboards (jak3 Wasteland dust stacks screen-sized blended quads in bucket 570).
+    // Mode-1 measures the box from the rotated basis; mode-3 corners live in xyz_array,
+    // so transform all four and measure the screen spread around the center instead.
+    // Same post-Q 2048-centered units as mode-1 (256 = half screen width), same
+    // thresholds, and the early-Z pre-pass reuses this shader, so both passes fade.
+    float fade_end = consts1.w;
+    if (fade_end > 0.0) {
+      vec4 center = sprite_transform2(position, vec4(0.0), rot, sx, sy);
+      vec2 ext = vec2(0.0);
+      for (uint k = 0u; k < 4u; k++) {
+        vec4 tk = sprite_transform2(position, xyz_array[k], rot, sx, sy);
+        ext = max(ext, abs(tk.xy - center.xy));
+      }
+      float screen_frac = (ext.x / 256.0) * (ext.y / 128.0 * (512.0 / 448.0));
+      float k_fade = clamp((fade_end - screen_frac) / (fade_end * 0.65), 0.0, 1.0);
+      if (k_fade <= 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);  // all corners equal: zero area, clipped
+        fragment_color = vec4(0.0);
+        tex_coord = vec3(0.0);
+        tex_info = tex_info_in.xy;
+        return;
+      }
+      fragment_color.w *= k_fade;
+    }
   } else if (rendermode == 1u) {
     transformed_pos_vf02.xyz *= Q;
     vec4 offset_pos_vf10 = transformed_pos_vf02 + hvdf_offset;

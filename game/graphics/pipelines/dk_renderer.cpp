@@ -1067,6 +1067,20 @@ void dk_loader_start() {
       snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_nosprite.txt",
                game_version_names[g_game_version]);
       s_dk_jak3_sprite = access(path, F_OK) != 0;  // record_world checks the shaders
+      if (s_dk_jak3_sprite) {
+        // #17 (AI-assisted): near-camera sprite fade for the jak3 Wasteland dust
+        // (bucket 570 stacks screen-sized blended quads, 4.5 ms/frame in the gpu
+        // profiler). jak1 arms this in its own init; jak3 needs it for the dust.
+        // The fade itself (mode-1 and now mode-3 3D billboards, plus the early-Z
+        // pre-pass which reuses sprite3.vert) is in sprite3.vert.glsl; this only
+        // arms it. gk_dk_nospritefade.txt = off (A/B on HW).
+        snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_dk_nospritefade.txt",
+                 game_version_names[g_game_version]);
+        const bool sprite_fade = access(path, F_OK) != 0;
+        dksprite::set_near_fade(sprite_fade ? 1.0f : 0.f);
+        switch_run_logf("[dk] jak3 sprite near fade %s",
+                        sprite_fade ? "ON" : "OFF (gk_dk_nospritefade.txt)");
+      }
       dkdev::set_world_recorder(record_jak3_dkgl);
       switch_run_logf("[dk] jak3 dkgl world ON (%d buckets, native world %s, gpu profiler %s, "
                       "particles %s)",

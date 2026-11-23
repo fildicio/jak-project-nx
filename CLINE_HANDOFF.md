@@ -1305,6 +1305,12 @@ lines at that timestamp for a wrong texture (row-M class).
   for f in GAME.CGO TSZ.DGO; do cp "$SD/$f" "$B/jak2-$f.$(md5 -q "$SD/$f" | cut -c1-8).bak"; cp "$ISO/$f" "$SD/$f"; done
   md5 -q "$SD/GAME.CGO" "$SD/TSZ.DGO"   # expect 8da29cac… / 0efa34e0…
   ```
+  **SUPERSEDED (2026-11-23 audit):** this deploy happened via the Nov-18 sessions —
+  the card now holds the later superset build `GAME.CGO 104e34cc…` (full-tree md5
+  diff vs local, see the "Card now carries" list below), which includes this fix.
+  The `8da29cac` md5s above are historical. jak2 in-session VO switching is
+  verified deployed; see the FIX 156 section (bottom of file) for the full
+  language-menu audit — jak3 had the same bug, unfixed until then.
 - Cleanup trap hit twice this session: the rebuild resurrects ALL language files.
   This time `rm VAGWAD.*` also killed ENG/ITA locally (restored via rebuild, md5s
   unchanged `f7b3ae73…`/`5de6270f…`). Always delete with an EXPLICIT name list.
@@ -3132,3 +3138,134 @@ HW test (jak3, one run, all optional features OFF by default):
 3. Optional: `sdmc:/gk_sync_log.txt` for a power-off debugging session only (~6 ms
    per log line while present).
 
+
+
+
+## 2026-11-23 FIX 156 — language-menu audit + jak3 in-session audio-language fix (AI-assisted)
+
+**User report:** "check if the language menu settings is actually working — we fixed
+that in jak2 already, I don't think it works."
+
+**Audit result (all three games, full GOAL→RPC→overlord chain):**
+- **jak2 — WORKS, fix deployed.** The §3 fix (`(set-language lang)` direct call in
+  `game-options-pc-sound-language` on-confirm) is in the source
+  (`goal_src/jak2/pc/progress/progress-static-pc.gc:417`) and in the built data:
+  deterministic rebuild reproduces `GAME.CGO 104e34cc…`, which the Nov-18 full-tree
+  md5 diff confirmed is what the card holds. Switch Speech Language in Options →
+  voices switch from the NEXT spoken line. Text Language = restart only (upstream
+  limitation — ND's own code comment: the on-confirm `load-level-text-files` reload
+  "doesn't actually work"; `load-game-text-info` picks `{N}COMMON.TXT` from
+  `*pc-settings* text-language` at load time). Subtitle Language = live (read at
+  subtitle draw time, `pc/subtitle2.gc:109`).
+- **jak1 — WORKS, live.** The cycler writes only `default.language` through
+  `value-to-modify`, the diff path fires, RPC goes out live; overlord prints
+  `IOP language: <lang>` per switch.
+- **jak3 — HAD THE SAME BUG, never fixed → this is what the user saw.**
+  `game-options-pc-sound-language` on-confirm wrote BOTH
+  `user-default audio-language` AND `user-current audio-language`, so
+  `setting-control`'s update() (`engine/game/settings.gc:1628`) never saw a change
+  and never sent the `set-language` RPC. The overlord's `g_pszLanguage` (set only by
+  `SoundCommand::SET_LANGUAGE`, `game/overlord/jak3/srpc.cpp:543`, consumed by
+  `EEVagAndVagWad` → `VAGWAD.<lang>`, `iso_api.cpp:45`) stayed on the boot language
+  until a full restart. **Restart DID apply it** (boot update path), so it looked
+  exactly like the old jak2 bug.
+
+**Fix (`goal_src/jak3/pc/progress/progress-static-pc.gc`, on-confirm):** direct
+`(set-language lang)` call, mirroring jak2's fix and replicating the update path's
+unsupported-language remap (`uk-english/korean/russian/dutch/portuguese` → english
+VO — same `case` as `settings.gc:1630`). Carousel index == `language-enum` value
+(english 0 … uk-english 11, `kernel-defs.gc`), so `(the-as language-enum index)` is
+correct. Saved settings are unchanged — behaviour identical to before, just applied
+live. NOTE the update-path `rpc-busy` guard is deliberately NOT replicated: a
+one-shot confirm can't retry, and the RPC queue serializes anyway (jak2's shipped
+fix has no guard either).
+
+**Build (GOAL arm64, `make-group "iso"`, 1164 targets, 0 errors):** first attempt
+failed on my own missing paren (reader error at EOF — added `let` without its
+close). `GAME.CGO 64ba6b2e…` → **`06f798334cb9e9bfe0fc3075ce9ed31e`**, deterministic
+(rebuild reproduces byte-for-byte). **Only GAME.CGO changed** (no DGO relink) —
+deploy is that one file. No NRO change (pure GOAL).
+
+**jak2 side-verification this session:** deterministic rebuild reproduces
+`104e34cc` unchanged; the make-group run re-resurrected 30 pruned language files
+locally (`{1,2,3,5,6,8..22}COMMON.TXT`, `SCREEN1.{FRE,GER,JAP,KOR,SPA}`,
+`VAGWAD.{FRE,GER,JAP,KOR,SPA}`) — re-deleted with the explicit name list, local iso
+back to the 555-file keep state, keep-list md5s unchanged
+(VAGWAD.ENG/ITA `f7b3ae73…`/`5de6270f…`). jak3's iso was never language-pruned,
+nothing to clean there.
+
+**DEPLOY DONE — 2026-11-23 12:46 (card remounted; this session).** The card's
+pre-deploy jak3 GAME.CGO was actually `64ba6b2e` (Nov-19 build), not `3861ef8b`
+(the "Card now carries" list at ~line 2541 was stale on this item). Old build
+rotated in-place to `GAME.CGO.bak64ba6b2e-pre156` (card iso dir), FIX 156 build
+copied, `._GAME.CGO*` purged, `sync`, md5 verified on card:
+**`06f798334cb9e9bfe0fc3075ce9ed31e`** ✔. HW language test still pending (below).
+
+**HW test (jak3, after the data deploy):** boot, Options → Audio Language, switch
+English ↔ Italian mid-game, confirm → next spoken dialog line switches language
+with no restart. Optional log evidence: `[RPC Loader] Got set language command <n>`
+(overlord PLAYER_RPC category, if logging is on in the run log).
+
+---
+
+## 2026-11-23 HW run verdict — FIX 154/155 perf VERIFIED; jak3 menu-audio glitch triaged; FIX 156 deployed (AI-assisted)
+
+Run analyzed: 2026-11-23 12:29–12:36 (~7.5 min), NRO `b64ed600` (FIX 154+155),
+GAME.CGO still the pre-156 `64ba6b2e` at run time. Sources: card `gk_run_log.txt`
+(last session = lines 145951+), `gk_stdout.txt` (last session from the
+`[texfmt] FIX 154` line), `gk_boot_log.txt` (last boot), `dk_replay.dma/golden`
+(captured 12:31 — R1 chain worked).
+
+**FIX 154 (BCn kept compressed) — WORKS on HW:**
+- `[texfmt] FIX 154 jak3 dk path: BCn kept compressed (no CPU decode)` present in
+  `gk_stdout.txt`; **zero** `FIX 91 ... -> RGBA` decode bursts in the whole session
+  (pre-fix logs: 486 lines, up to 606 textures / 40.9 ms per burst, 31–48 ms hitches).
+- `[dk] loader: BCn textures 32 px tall decoded to RGBA8 (deko3d layout bug)` fired
+  once — expected fallback, no new sizes, no checkerboard regression reported.
+- tex live mem **121 MB** (ocean, ~2950 live) vs **168 MB** in the pre-fix
+  `fix145run`; `level title ready in 0.20s`; `slow setup` worst 9.6 ms (fix145:
+  9.7 ms — no regression, no 31–48 ms bursts anywhere).
+- fps: steady **60.0** in-game (`0 over 16.7` windows, gpu top ≤1.7 ms/frame),
+  title screen locked 60.0; dips only at boot load (24.8), heavy-combat windows
+  (51–53, EE-bound + the sound retrigger storm below), one 46.8 at a transition.
+- Note: `pools 414440 KB` in `[dk] fps` lines is the **fixed boot-time arena** and
+  is unchanged pre/post fix — the VRAM win shows up in `tex live mem`, not there.
+
+**FIX 155 — OK:** `[dk] live resize off (gk_dk_resize.txt enables it)` at boot;
+`gk_fatal.txt` 0 bytes (no crash); run ended cleanly at 12:36.
+
+**jak3 menu-audio glitch (user report: "menu stopped emitting any audio to select
+things") — triaged, PRE-EXISTING, not a FIX 154/155 regression:**
+- In EVERY title-menu window of EVERY captured jak3 run (j13probes Nov-19 → today),
+  the `[aud]` watchdog shows **0–1 plays/10 s** while the user navigates
+  (`live 1` ambient keeps playing, `late 0` — output stream healthy). Gameplay sound
+  in the same sessions works fine (hundreds of plays/10 s).
+- jak2's title/options menu DOES emit (98–433 plays/10 s during the Nov-20
+  language-menu run) — so it's a jak3-specific gap.
+- Menu beeps are `(sound-play "generic-beep"/"roll-over")` in
+  `goal_src/jak3/pc/progress/progress-pc.gc` (lines ~939–1013) →
+  `sound-play-by-name` (gsound.gc:671, gated on `*sound-player-enable*`) →
+  `*sound-player-rpc*` → kernel `rpc-call` port 0 → overlord `RPC_Player` →
+  `snd_PlaySoundByNameVolPanPMPB` → the `[aud] plays` counter. All of that
+  machinery is shared with jak2 and provably works in jak3 gameplay — but the
+  menu's calls never become plays. Static chase through gsound.gc / rpc-h.gc /
+  kdgo.cpp (RpcBind/RpcCall/RpcBusy) / overlord srpc.cpp found no version-gated
+  hole. Remaining suspects: the menu code never reaches those `sound-play` lines,
+  or the `defbehavior process-drawable` context drops them before the RPC flush.
+- **Next step (FIX 157 candidate):** one-shot GOAL probe in jak3
+  `sound-play-by-name`: `(format 0 "[SND157] play enable=~A name-lo=~D~%" ...)` →
+  goes to `gk_stdout.txt`; one title-menu run answers whether the call happens
+  and whether `*sound-player-enable*` is `#f` at that moment.
+- Related, separate: combat windows show the FIX 121/122 retrigger storm
+  (plays 2911/10 s, `limit` 2440, instant-death ~800) — that's the known CPU cost
+  in combat dips, unchanged by these fixes.
+
+**Log hygiene (perf-review item 5) — now urgent:** this 7.5-min session wrote a
+13.4 MB `gk_run_log.txt` (~162k lines: `[pool] give/unload` ~90k, `[goal]`
+profiler ~47k) and 2.7 MB `gk_stdout.txt` (25k `lookup eye failed for ...` lines).
+Trim/gate these before the next long session.
+
+**Card state after this session:** jak3.nro `b64ed600` (unchanged, good), GAME.CGO
+`06f798334cb9e9bfe0fc3075ce9ed31e` (FIX 156, deployed 12:46, see above).
+Pending HW tests: (1) jak3 audio-language switch mid-game (FIX 156); (2) the
+menu-audio probe above.

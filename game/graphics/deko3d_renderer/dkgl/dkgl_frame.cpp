@@ -2983,7 +2983,30 @@ bool capture_begin(const void* chain_data, u32 chain_offset) {
       }
     }
   } else {
-    s_srs->default_regs_buffer = 0;  // GL jak2 never sets one (fog stays at its default)
+    s_srs->default_regs_buffer = 0;  // GL jak2 never sets one
+    // FIX 156 (AI-assisted, jak3 HW 2026-11-23: distant wasteland cars/grass solid black):
+    // gen-2 fog colour comes from GL VisDataHandler (bucket 2, vif0 of each vis packet, last
+    // wins). That bucket is native-only (census §2), so dkgl Merc2/Generic2 kept the
+    // {0,0,0,0} default and fogged far objects to black. Same walk as VisDataHandler::render.
+    // A/B: sdmc:/gk_dkgl_nofog.txt restores the old black fog.
+    static const bool s_fog_off = flag("gk_dkgl_nofog.txt");
+    const bool is_jak2 = g_game_version == GameVersion::Jak2;
+    const int vis_bucket =
+        is_jak2 ? (int)jak2::BucketId::BUCKET_2 : (int)jak3::BucketId::BUCKET_2;
+    const int levels = is_jak2 ? jak2::LEVEL_MAX : jak3::LEVEL_MAX;
+    const u32 vis_end = buckets_base + 16 * (vis_bucket + 1);
+    DmaFollower v(chain_data, buckets_base + 16 * vis_bucket);
+    v.read_and_advance();  // the bucket's own start tag
+    for (int i = 0; !s_fog_off && i < levels && !v.ended() && v.current_tag_offset() != vis_end;
+         i++) {
+      auto p = v.read_and_advance();
+      const u32 vif0 = p.vif0();
+      memcpy(s_srs->fog_color.data(), &vif0, 4);
+      if (p.vifcode1().kind != VifCode::Kind::PC_PORT || v.ended()) {
+        break;
+      }
+      v.read_and_advance();  // size-0 terminator after every vis packet
+    }
   }
   s_srs->buckets_base = buckets_base;
   s_srs->ee_main_memory = (void*)chain_data;
