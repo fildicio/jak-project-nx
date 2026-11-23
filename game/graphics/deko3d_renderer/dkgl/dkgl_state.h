@@ -250,6 +250,10 @@ void vertex_attrib_i_pointer(u32 index, int size, u32 type, u32 stride, const vo
 // textures / FBO (T105)
 void gen_textures(int n, u32* out);
 void delete_textures(int n, const u32* in);
+//! FIX 155 (AI-assisted): with live resize on (gk_dk_resize.txt), a dropped / respecified
+//! texture also releases its dk image (dktexgpu::release, kReleaseDelay presents later);
+//! off = P8 (image memory kept). Set once from the main thread before the game starts.
+void set_drop_dk_images(bool on);
 void active_texture(u32 unit_enum);
 void bind_texture(u32 name);
 void tex_parameteri(u32 pname, u32 param);

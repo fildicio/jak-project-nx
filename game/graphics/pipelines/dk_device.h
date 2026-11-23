@@ -39,6 +39,16 @@ bool init(int fb_width, int fb_height);
 bool is_up();
 void shutdown();
 
+//! FIX 155 (AI-assisted; Switch 1 subset of the Switch 2 fork's live resize, plan P1.2b):
+//! rebuild the swapchain, its colour images and the depth buffer at w x h. Render thread
+//! only, between frames: waits for both queues to go idle first. If the new size cannot be
+//! built the previous one is restored. true = renderer usable (maybe at the old size);
+//! false = renderer is down. Apply the swap interval again afterwards.
+bool resize(int w, int h);
+//! Current swapchain size (changes on resize()).
+int fb_width();
+int fb_height();
+
 void set_swap_interval(unsigned interval);
 
 //! Upload the boot splash (RGBA8, row-major, top row first). Copies the pixels.

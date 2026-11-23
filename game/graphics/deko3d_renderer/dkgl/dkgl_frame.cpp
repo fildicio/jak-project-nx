@@ -1898,10 +1898,26 @@ void note_interleaved_frame() {
 }
 
 void set_frame_size(int w, int h) {
-  if (w > 0 && h > 0) {
-    s_fb_w = w;
-    s_fb_h = h;
+  if (w <= 0 || h <= 0) {
+    return;
   }
+  // FIX 155 (AI-assisted; Switch 1 subset of the Switch 2 fork): dkdev::resize() re-creates the
+  // frame depth image, so the glow probe's alias must point at the new one before anything
+  // samples it -- the stale alias references freed memory (Switch 2 fork run 12: GPU fault,
+  // DkResult_Fail 0x367, right after every resize). This is the single choke point every frame
+  // size change goes through (init + resize); it runs on the render thread (the dktexgpu
+  // owner) and does nothing while the size does not change.
+  if (s_frame_depth_alias != 0 && (w != s_fb_w || h != s_fb_h)) {
+    if (dktexgpu::alias_external_image(s_frame_depth_alias, dkdev::frame_depth_image(), w, h) ==
+        0) {
+      switch_run_logf("[dkgl] glow: frame depth re-alias FAILED, glow disabled");
+      s_glow.reset();
+    } else {
+      switch_run_logf("[dkgl] glow: frame depth re-aliased %dx%d -> %dx%d", s_fb_w, s_fb_h, w, h);
+    }
+  }
+  s_fb_w = w;
+  s_fb_h = h;
 }
 
 int bucket_count() {

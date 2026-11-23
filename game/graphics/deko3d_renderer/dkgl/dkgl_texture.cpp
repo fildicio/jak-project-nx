@@ -141,6 +141,33 @@ FboObj* fbo_by_id(u32 id) {
   return f->live ? f : nullptr;
 }
 
+// FIX 155 (AI-assisted; Switch 1 subset of the Switch 2 fork's drop_dk_image): free a dkgl
+// texture's dk image when the GL texture is dropped (respecify / delete). Off by default:
+// without live resize the frame size never changes and P8 applies (image memory kept, exactly
+// as before this change). With gk_dk_resize.txt on, every dock/undock would otherwise leak the
+// previous set of frame-sized render targets (Switch 2 fork run 14: image pool 160 -> 186 ->
+// 232 -> 298 -> 324 MB over four resizes). dktexgpu::release() frees kReleaseDelay presents
+// later, so frames still in flight keep a valid image. Not freed: the frame depth alias
+// (owned by dkdev). Ids exported to the TexturePool are released too (Switch 2 fork run 16:
+// the PC-WARP frame copy and the FIX 138 BlitDisplays copies are frame-sized): dktexgpu ids
+// are never reused and the g_exported entry is KEPT on respecify, so bind_texture still
+// redirects a stale id from a tbp slot to the GL texture's current image, and native passes
+// skip an id whose slot_of() is gone.
+bool s_drop_dk_images = false;
+
+void drop_dk_image(u32 dk_id) {
+#if defined(__SWITCH__)
+  if (!s_drop_dk_images || dk_id == 0 || dk_id == g_frame_depth_tex) {
+    return;
+  }
+  if (dkdev::is_up() && dktexgpu::active()) {
+    dktexgpu::release(dk_id);
+  }
+#else
+  (void)dk_id;
+#endif
+}
+
 // Create the dktexgpu render target on first need. Returns 0 ONLY if the Switch-side
 // create fails; on host (no dk device) materializes to a deterministic fake id so
 // tests can assert "second resolve -> same id, one creation".
@@ -173,6 +200,10 @@ u32 materialize(TexObj& t, u32 gl_id) {
 
 }  // namespace
 
+void set_drop_dk_images(bool on) {
+  s_drop_dk_images = on;
+}
+
 // ---- textures -----------------------------------------------------------------
 void gen_textures(int n, u32* out) {
   for (int i = 0; i < n; ++i) {
@@ -195,7 +226,8 @@ void delete_textures(int n, const u32* in) {
   for (int i = 0; i < n; ++i) {
     TexObj* t = tex_by_gl(in[i]);
     if (t) {
-      *t = TexObj{};  // drops dk_tex_id: the image memory is NOT freed (P8, by design)
+      drop_dk_image(t->dk_tex_id);  // FIX 155: freed only with live resize on; else P8, kept
+      *t = TexObj{};  // drops dk_tex_id
     }
     for (auto it = g_exported.begin(); it != g_exported.end();) {
       it = it->second == in[i] ? g_exported.erase(it) : std::next(it);
@@ -334,6 +366,7 @@ bool tex_image_2d(int level, u32 internal_format, int w, int h, u32 format, u32 
       if (t->dk_tex_id != 0) {
         ++g_respecify_count;
       }
+      drop_dk_image(t->dk_tex_id);  // FIX 155: freed only with live resize on; else P8, kept
       t->dk_tex_id = 0;
       t->was_rendered_to = false;
       t->barrier_done = false;
@@ -702,7 +735,8 @@ void renderbuffer_storage(u32 internal_format, int w, int h) {
     ++g_bad_tex_format_count;  // colour renderbuffers: no user
   }
   if (t->w != w || t->h != h) {
-    t->dk_tex_id = 0;  // respecified: a new image is materialized lazily (old one not freed, P8)
+    drop_dk_image(t->dk_tex_id);  // FIX 155: freed only with live resize on; else P8, kept
+    t->dk_tex_id = 0;  // respecified: a new image is materialized lazily
   }
   t->w = w;
   t->h = h;

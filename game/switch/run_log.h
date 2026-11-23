@@ -147,6 +147,17 @@ inline void switch_set_diag_enabled(bool enabled) {
   } while (0)
 
 /*!
+ * FIX 155 (AI-assisted; Switch 2 fork port): with sdmc:/gk_sync_log.txt on the card EVERY
+ * line is forensic (written + fsync'd at once). A whole-console power-off otherwise loses the
+ * last ~2 s of buffered lines, which is the part that matters. Costs ~6 ms per line (FIX 40),
+ * so it is opt-in. Checked once per session.
+ */
+inline bool switch_run_log_sync_every_line() {
+  static const bool s_on = access("sdmc:/gk_sync_log.txt", F_OK) == 0;
+  return s_on;
+}
+
+/*!
  * FIX 40 -- THE TELEMETRY WAS THE STUTTER. (AI-assisted)
  *
  * Every line written here cost about 6 ms on the console. That is not a guess; the
@@ -191,7 +202,7 @@ inline void switch_run_log_flush_locked(int& fd, char* pending, int& len, long l
     } else {
       // FIX 7w: fsync is a synchronous flush to the card; keep it on a timer.
       static long long s_last_sync_ms = 0;
-      if (ms - s_last_sync_ms >= 1000) {
+      if (switch_run_log_sync_every_line() || ms - s_last_sync_ms >= 1000) {
         s_last_sync_ms = ms;
         fsync(fd);
       }
@@ -238,9 +249,9 @@ inline void switch_run_logf(const char* fmt, ...) {
 
   // A forensic line must reach the card even if this is the last instruction the process
   // executes, so it is worth blocking for. Everything else is telemetry and is not.
-  const bool forensic = strstr(buf, "EXCEPTION") || strstr(buf, "[exit]") ||
-                        strstr(buf, "fatal") || strstr(buf, "FATAL") ||
-                        strstr(buf, "abort");
+  const bool forensic = switch_run_log_sync_every_line() || strstr(buf, "EXCEPTION") ||
+                        strstr(buf, "[exit]") || strstr(buf, "fatal") ||
+                        strstr(buf, "FATAL") || strstr(buf, "abort");
 
   // FIX 41 (AI-assisted): the ordinary path must not touch the filesystem lock at all.
   // FIX 40 buffered the writes but still asked for the lock on every line with a 2 ms

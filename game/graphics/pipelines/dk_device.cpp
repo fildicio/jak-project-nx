@@ -20,6 +20,7 @@
 #include <string.h>
 #include <switch.h>
 #include <unistd.h>
+#include <algorithm>  // std::min (clamp_to_fb, FIX 155)
 #include <atomic>  // frame grab: s_grabRequest (combo -> present path)
 #include "dksh/splash_vert.h"
 #include "dksh/splash_frag.h"
@@ -281,8 +282,12 @@ uint32_t align_up(uint32_t v, uint32_t a) {
 
 void dk_debug_cb(void*, const char* context, DkResult result, const char* message) {
   // deko3d calls this on API misuse/failure; the log line is the diagnostic.
-  switch_run_logf("[dk] debug ctx=%s result=%d msg=%s", context ? context : "?", (int)result,
-                  message ? message : "?");
+  // FIX 155 (AI-assisted; Switch 2 fork port): a failed call is marked "FATAL", which run_log
+  // treats as forensic (written + fsync'd at once) -- an error that leads to an abort has to be
+  // on the card even if nothing else runs afterwards.
+  switch_run_logf("[dk] debug%s ctx=%s result=%d msg=%s",
+                  result != DkResult_Success ? " FATAL" : "", context ? context : "?",
+                  (int)result, message ? message : "?");
 }
 
 DkMemBlock make_block(uint32_t size, uint32_t flags, const char* what) {
@@ -502,6 +507,32 @@ void shutdown() {
   s_up = false;
 }
 
+// FIX 155 (AI-assisted; Switch 2 fork port): colour layout flags picked in init() (compression
+// on/off); resize() reuses them.
+static uint32_t s_fbLayoutFlags = 0;
+
+// Swapchain colour + Z24S8 depth layouts for a w x h frame (T60 depth: deko3d Example04 flags).
+static void make_fb_layouts(int w, int h, DkImageLayout* fb, uint32_t* fbSize,
+                            DkImageLayout* depth, uint32_t* depthSize) {
+  DkImageLayoutMaker lm;
+  dkImageLayoutMakerDefaults(&lm, s_dev);
+  lm.flags = s_fbLayoutFlags;
+  lm.format = DkImageFormat_RGBA8_Unorm;
+  lm.dimensions[0] = (uint32_t)w;
+  lm.dimensions[1] = (uint32_t)h;
+  dkImageLayoutInitialize(fb, &lm);
+  *fbSize = align_up((uint32_t)dkImageLayoutGetSize(fb), dkImageLayoutGetAlignment(fb));
+
+  DkImageLayoutMaker dlm;
+  dkImageLayoutMakerDefaults(&dlm, s_dev);
+  dlm.flags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
+  dlm.format = DkImageFormat_Z24S8;
+  dlm.dimensions[0] = (uint32_t)w;
+  dlm.dimensions[1] = (uint32_t)h;
+  dkImageLayoutInitialize(depth, &dlm);
+  *depthSize = align_up((uint32_t)dkImageLayoutGetSize(depth), dkImageLayoutGetAlignment(depth));
+}
+
 bool init(int fb_width, int fb_height) {
   if (s_up) {
     return true;
@@ -546,25 +577,10 @@ bool init(int fb_width, int fb_height) {
     }
     switch_run_logf("[dk] frame target compression %s", no_comp ? "OFF (gk_dk_nofbcomp.txt)" : "ON");
   }
-  lm.format = DkImageFormat_RGBA8_Unorm;
-  lm.dimensions[0] = (uint32_t)fb_width;
-  lm.dimensions[1] = (uint32_t)fb_height;
-  DkImageLayout fbLayout;
-  dkImageLayoutInitialize(&fbLayout, &lm);
-  const uint32_t fbSize =
-      align_up((uint32_t)dkImageLayoutGetSize(&fbLayout), dkImageLayoutGetAlignment(&fbLayout));
-
-  // T60: Z24S8 depth buffer, same flags as deko3d Example04 (L238).
-  DkImageLayoutMaker dlm;
-  dkImageLayoutMakerDefaults(&dlm, s_dev);
-  dlm.flags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
-  dlm.format = DkImageFormat_Z24S8;
-  dlm.dimensions[0] = (uint32_t)fb_width;
-  dlm.dimensions[1] = (uint32_t)fb_height;
-  DkImageLayout depthLayout;
-  dkImageLayoutInitialize(&depthLayout, &dlm);
-  const uint32_t depthSize = align_up((uint32_t)dkImageLayoutGetSize(&depthLayout),
-                                      dkImageLayoutGetAlignment(&depthLayout));
+  s_fbLayoutFlags = lm.flags;  // FIX 155: resize() rebuilds with the flags picked here
+  DkImageLayout fbLayout, depthLayout;
+  uint32_t fbSize = 0, depthSize = 0;
+  make_fb_layouts(fb_width, fb_height, &fbLayout, &fbSize, &depthLayout, &depthSize);
 
   // Budget check BEFORE any big allocation (see file comment).
   const unsigned long long need = (unsigned long long)kSwapImages * fbSize + kDataPool + kCodePool +
@@ -1176,10 +1192,31 @@ void rebind_frame_target() {
   dkCmdBufSetScissors(s_cmd, 0, &sc, 1);
 }
 
+// FIX 155 (AI-assisted; Switch 2 fork port): keep a frame-copy source rect inside the current
+// swapchain image. A caller that still asks for the previous frame size right after a resize
+// would read past the smaller image and fault the GPU (Switch 2 fork run 11). False = nothing
+// left to copy. A rect with a negative origin is not a stale-size rect: passed through as before.
+static bool clamp_to_fb(DkImageRect* r) {
+  const int32_t fb_w = s_fb_w, fb_h = s_fb_h;
+  if (r->x >= fb_w || r->y >= fb_h) {
+    return false;  // entirely outside
+  }
+  if (r->x < 0 || r->y < 0) {
+    return true;
+  }
+  r->width = std::min<uint32_t>(r->width, (uint32_t)(fb_w - r->x));
+  r->height = std::min<uint32_t>(r->height, (uint32_t)(fb_h - r->y));
+  return r->width > 0 && r->height > 0;
+}
+
 void blit_frame_to(const DkImageView* dst, const DkImageRect* src_rect, const DkImageRect* dst_rect,
                    uint32_t flags) {
+  DkImageRect src = *src_rect;
+  if (!clamp_to_fb(&src)) {
+    return;
+  }
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, 0);
-  dkCmdBufBlitImage(s_cmd, &s_curFbView, src_rect, dst, dst_rect, flags, 0);
+  dkCmdBufBlitImage(s_cmd, &s_curFbView, &src, dst, dst_rect, flags, 0);
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Image);
 }
 
@@ -1203,9 +1240,116 @@ void blit_prev_frame_to(const DkImageView* dst, const DkImageRect* src_rect,
   }
   DkImageView prev;
   dkImageViewDefaults(&prev, &s_fb[s_prevImg]);
+  DkImageRect src = *src_rect;
+  if (!clamp_to_fb(&src)) {
+    return;
+  }
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, 0);
-  dkCmdBufBlitImage(s_cmd, &prev, src_rect, dst, dst_rect, flags, 0);
+  dkCmdBufBlitImage(s_cmd, &prev, &src, dst, dst_rect, flags, 0);
   dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+}
+
+// ---- live resize (FIX 155) ---------------------------------------------------------
+
+int fb_width() {
+  return s_fb_w;
+}
+
+int fb_height() {
+  return s_fb_h;
+}
+
+// Both queues must be idle. Takes the swapchain off the window before its images' memory
+// goes away (dkSwapchainDestroy is nwindowReleaseBuffers in deko3d 0.5.0) and keeps the
+// s_pool_bytes telemetry honest (shutdown() zeroes it as a whole).
+static void destroy_frame_targets() {
+  if (s_swap) {
+    dkSwapchainDestroy(s_swap);
+    s_swap = nullptr;
+  }
+  DkMemBlock* blocks[] = {&s_fbMem, &s_depthMem};
+  for (DkMemBlock* b : blocks) {
+    if (*b) {
+      s_pool_bytes -= dkMemBlockGetSize(*b);
+      dkMemBlockDestroy(*b);
+      *b = nullptr;
+    }
+  }
+  s_have_depth = false;
+  s_prevImg = -1;  // the pause backdrop must not copy from a freed image
+}
+
+// Builds the swapchain colour images, the depth buffer and the swapchain for the CURRENT
+// s_fb_w x s_fb_h, in the same order as init(). False = nothing to present into (the caller
+// unwinds with destroy_frame_targets()).
+static bool rebuild_frame_targets() {
+  DkImageLayout fbLayout, depthLayout;
+  uint32_t fbSize = 0, depthSize = 0;
+  make_fb_layouts(s_fb_w, s_fb_h, &fbLayout, &fbSize, &depthLayout, &depthSize);
+  s_fbMem = make_block(kSwapImages * fbSize, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+                       "fb");
+  if (!s_fbMem) {
+    switch_run_logf("[dk] resize %dx%d FAILED: fb memblock (%u KB)", s_fb_w, s_fb_h,
+                    kSwapImages * fbSize / 1024);
+    return false;
+  }
+  DkImage const* swapImgs[kSwapImages];
+  for (unsigned i = 0; i < kSwapImages; i++) {
+    dkImageInitialize(&s_fb[i], &fbLayout, s_fbMem, i * fbSize);
+    swapImgs[i] = &s_fb[i];
+  }
+  // T60: not fatal when it fails -- only the tfrag world pass needs it.
+  s_depthMem = make_block(depthSize, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, "depth");
+  if (s_depthMem) {
+    dkImageInitialize(&s_depth, &depthLayout, s_depthMem, 0);
+    s_have_depth = true;
+  }
+  // Same as init(): the default native window is ours (SDL video is never initialized).
+  NWindow* win = nwindowGetDefault();
+  nwindowSetDimensions(win, (u32)s_fb_w, (u32)s_fb_h);
+  DkSwapchainMaker sm;
+  dkSwapchainMakerDefaults(&sm, s_dev, win, swapImgs, kSwapImages);
+  s_swap = dkSwapchainCreate(&sm);
+  if (!s_swap) {
+    switch_run_logf("[dk] resize %dx%d FAILED: dkSwapchainCreate", s_fb_w, s_fb_h);
+    return false;
+  }
+  return true;
+}
+
+bool resize(int w, int h) {
+  if (!s_up || w <= 0 || h <= 0 || (w == s_fb_w && h == s_fb_h)) {
+    return s_up;
+  }
+  const u64 t0 = armGetSystemTick();
+  const int old_w = s_fb_w, old_h = s_fb_h;
+  // Nothing may still read or write the old images: wait for every submitted list first.
+  dkQueueWaitIdle(s_queue);
+  if (s_upQueue) {
+    dkQueueWaitIdle(s_upQueue);
+  }
+  destroy_frame_targets();
+  s_fb_w = w;
+  s_fb_h = h;
+  if (rebuild_frame_targets()) {
+    switch_run_logf("[dk] resized %dx%d -> %dx%d (depth %d), %.1f ms", old_w, old_h, w, h,
+                    (int)s_have_depth, ms_since(t0));
+    return true;
+  }
+  // Could not build the new size (out of memory, the window refused it): the old one is known
+  // good, so go back to it instead of leaving nothing to present into.
+  destroy_frame_targets();
+  s_fb_w = old_w;
+  s_fb_h = old_h;
+  if (rebuild_frame_targets()) {
+    switch_run_logf("[dk] resize to %dx%d FAILED, restored %dx%d, %.1f ms", w, h, old_w, old_h,
+                    ms_since(t0));
+    return true;
+  }
+  switch_run_logf("[dk] resize to %dx%d FAILED and %dx%d could not be restored: renderer down", w,
+                  h, old_w, old_h);
+  s_up = false;
+  return false;
 }
 
 void gpu_mark(int i) {

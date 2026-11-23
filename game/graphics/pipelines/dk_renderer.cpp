@@ -47,6 +47,7 @@
 #include "game/graphics/deko3d_renderer/SkyDk.h"           // T88: jak1 sky CPU blend
 #include "game/graphics/deko3d_renderer/dk_ocean_driver.h"  // T95: jak1 ocean
 #include "game/graphics/deko3d_renderer/dkgl/dkgl_frame.h"  // T107: GL ocean through dkgl
+#include "game/graphics/deko3d_renderer/dkgl/dkgl_state.h"  // FIX 155: set_drop_dk_images
 // FIX 121: dkgl_state.h declaration, kept local like TextureAnimator.cpp does.
 namespace dkgl {
 void set_int_attrib_draws(bool on);
@@ -155,6 +156,21 @@ bool dk_pass_on(GameVersion version, const char* file) {
 
 bool dkload_present() {
   return dk_pass_on(g_game_version, "gk_dkload.txt");
+}
+
+// FIX 155 (AI-assisted; Switch 1 subset of the Switch 2 fork's dock/undock resize, plan P1.2b):
+// while ON, DkDisplay::render() follows the operation mode live -- handheld 1280x720, docked
+// 1920x1080 (the FIX 73c sizes) -- instead of keeping the swapchain at its boot size (720p
+// upscaled on a TV, or 1080p rendered and downscaled in handheld). Opt-in until it has been
+// verified on hardware: sdmc:/switch/<game>/gk_dk_resize.txt. Read once in dk_make_display
+// (main thread, before the game threads exist: fsdev is not thread-safe).
+static bool s_live_resize = false;
+
+static bool live_resize_requested() {
+  char path[96];
+  snprintf(path, sizeof(path), "sdmc:/switch/%s/gk_dk_resize.txt",
+           game_version_names[g_game_version]);
+  return access(path, F_OK) == 0;
 }
 
 // T60 (AI-assisted): OPT-IN P3 tfrag world pass, only with sdmc:/switch/jak1/gk_dktfrag.txt
@@ -1136,6 +1152,7 @@ class DkDisplay : public GfxDisplay {
   bool m_seen_chain = false;
   unsigned m_swap_interval = ~0u;  // force the first frame to apply it
   int m_op_mode = -1;             // docked/handheld state for P1.2b change logging (T09)
+  int m_opmode = -1;              // FIX 155: last operation mode seen by the live-resize check
   bool m_focused = true;          // pause present while out of focus (T10 / P1.2b)
 
   struct Stats {
@@ -1216,8 +1233,8 @@ void DkDisplay::process_events() {
   }
   const int mode = dkdev::operation_mode();
   if (mode != m_op_mode) {
-    switch_run_logf("[dk] operation mode: %s (swapchain stays at boot size until P1.2b resize)",
-                    mode ? "docked" : "handheld");
+    switch_run_logf("[dk] operation mode: %s (live resize %s)", mode ? "docked" : "handheld",
+                    s_live_resize ? "on" : "off: swapchain stays at its boot size");
     m_op_mode = mode;
   }
 }
@@ -1246,6 +1263,33 @@ void DkDisplay::render() {
   m_display_manager->process_ee_events();
   m_input_manager->process_ee_events();
   m_display_manager->set_game_size(Gfx::g_global_settings.lbox_w, Gfx::g_global_settings.lbox_h);
+  // FIX 155 (AI-assisted): follow dock/undock live (opt-in, see s_live_resize). Done here, before
+  // anything of this frame is recorded, so the whole frame -- native passes + the dkgl viewport
+  // via set_frame_size -- uses the new size. dkdev::resize() idles the GPU first, so this runs
+  // strictly between frames. The first frame only records the mode: init already sized the
+  // swapchain for it.
+  if (s_live_resize) {
+    const int opmode = dkdev::operation_mode();  // 1 = docked, 0 = handheld
+    const bool first = m_opmode < 0;
+    const bool mode_changed = opmode != m_opmode;
+    m_opmode = opmode;
+    if (!first && mode_changed) {
+      const auto size = switch_platform::get_display_size_for_operation_mode();
+      if (size.w != dkdev::fb_width() || size.h != dkdev::fb_height()) {
+        switch_run_logf("[dk] live resize: %s -> target %dx%d", opmode == 1 ? "docked" : "handheld",
+                        size.w, size.h);
+        // fb_width()/fb_height() = what was really built (resize() restores the previous size
+        // when the new one cannot be).
+        if (dkdev::resize(size.w, size.h)) {
+          const int w = dkdev::fb_width(), h = dkdev::fb_height();
+          dkgl::set_frame_size(w, h);
+          switch_platform::set_created_window_size(w, h);
+          m_display_manager->set_native_window(w, h);
+          m_swap_interval = ~0u;  // re-apply vsync on the new swapchain
+        }
+      }
+    }
+  }
 
   if (SplashScreen && DiskBoot && !m_splash_done) {
     init_splash();
@@ -1775,6 +1819,12 @@ std::shared_ptr<GfxDisplay> dk_make_display(int /*width*/,
   if (!dkdev::init(size.w, size.h)) {
     return nullptr;  // Gfx::Init falls back to OpenGL
   }
+  // FIX 155 (AI-assisted): opt-in live dock/undock resize (see s_live_resize). Decided here, on
+  // the main thread before any game thread exists.
+  s_live_resize = live_resize_requested();
+  dkgl::set_drop_dk_images(s_live_resize);  // frame-sized render targets must not leak per resize
+  switch_run_logf("[dk] live resize %s",
+                  s_live_resize ? "ON (gk_dk_resize.txt)" : "off (gk_dk_resize.txt enables it)");
   switch_platform::set_created_window_size(size.w, size.h);
   auto display = std::make_shared<DkDisplay>(is_main);
   display->get_display_manager()->set_native_window(size.w, size.h);

@@ -3073,3 +3073,62 @@ jak3 `set_near_fade` threshold and extending the sprite fade to mode-3 beams;
 (5) log hygiene: buffer/trim `[RpcSync]`/`[sceOpen]` spam + the 12 MB
 `gk_run_log.txt` written to FAT32 during gameplay.
 
+
+## 2026-11-23 FIX 155 — Switch 2 fork triage + portable subset (live resize, drop-image, FATAL debug log) (AI-assisted — second concurrent agent's work, finished + verified here)
+
+Source: fork `clossify/switch2-port` (CL0SSIFY jak-S2) @ `e2bc7c9d1`, triaged hunk by
+hunk in `docs/deko3d/clossify-switch2-port-triage.md`. Everything `__SWITCH2__` /
+drako3d / kaiHEN is bucket c (future Switch 2 branch); the fork's `goal_src` hunks are
+regressions (they pre-date our FIX 126/128/129) and were never touched. Ported: the
+Switch 1 safe subset, all opt-in or logging-only:
+
+1. `dkdev::resize()` + `make_fb_layouts()` + `fb_width()/fb_height()`
+   (`dk_device.cpp/.h`): rebuild swapchain + colour images + depth at a new size,
+   waits both queues idle, destroys the old swapchain before its memblocks, restores
+   the previous size if the new one cannot be built (an improvement over the fork).
+   Switch 1 P1.2b variant: dock/undock follows live, handheld 1280x720 <-> docked
+   1920x1080 (the FIX 73c sizes). **Opt-in: `sdmc:/switch/<game>/gk_dk_resize.txt`**;
+   decided once in `dk_make_display` (main thread, fsdev is not thread-safe).
+2. `dkgl::set_drop_dk_images` (`dkgl_texture.cpp`): on live-resize only, a deleted /
+   respecified / renderbuffer-resized texture also releases its dk image
+   (`dktexgpu::release`, kReleaseDelay presents later). Off = P8, exactly the old
+   behaviour. Protects `g_frame_depth_tex` (the glow alias) and defers past frames
+   in flight. Fixes the fork's observed leak (pool 160 -> 324 MB over 4 resizes).
+3. Glow: `set_frame_size()` re-aliases the frame depth after a resize (the fork's
+   GPU-fault-after-resize bug — stale alias into freed memory).
+4. `clamp_to_fb()` in `blit_frame_to`/`blit_prev_frame_to` (negative-origin rects pass
+   through unchanged, as before).
+5. `dk_debug_cb`: a failed call logs as "FATAL" = forensic (on the card at once).
+6. `run_log.h`: with `sdmc:/gk_sync_log.txt` on the card EVERY line is forensic
+   (fsync each line, ~6 ms — opt-in diagnostic for whole-console power-offs).
+7. `test_dkgl_shader_gen.cpp`: program list synced with the FIX 138 programs
+   (`simple_texture`, `slow_time`) — `DkglShaderGen.UniformTables` was FAILING at
+   HEAD (26 tables vs 24 names), now 41/41.
+
+Default behaviour with no flag files on the card: unchanged (resize never runs,
+drop-dk-image is off, log is buffered as before).
+
+- dk-lint PASS. `check-switch.sh`: **jak1 PASS md5 5c5e9921921f0ae5ee60854bccff0fb0,
+  jak2 PASS md5 3cc8f961..., jak3 PASS md5 b64ed6001a40e77acd684a89afca6ae6** (all
+  three built with the change; only jak3 deployed).
+- Host: `Dkgl*` 41/41 PASS. Full `goalc-test` suite: ~1000 tests OK, then the
+  GOAL-JIT tests die with SIGILL (132) — **proven pre-existing**: identical
+  `--gtest_filter` run on a clean-HEAD binary (diff stashed) reproduces EXIT=132 at
+  the same point, and the crash point moves between runs (Jak1Kernel ~955 /
+  ArithmeticTests ~1000). Host x86_64-under-Rosetta JIT flakiness, renderer-only diff
+  cannot reach it. Recorded so nobody chases it as a FIX 155 regression.
+- Card (2026-11-23 12:25): `jak3.nro md5 b64ed6001a40e77acd684a89afca6ae6` (FIX
+  154 + 155). Previous card build `e358bbfa` (FIX 154, still untested on HW) rotated
+  to `jak3.nro.bake358bbfa-fix154`.
+
+HW test (jak3, one run, all optional features OFF by default):
+1. Normal boot — expect `[dk] live resize off (gk_dk_resize.txt enables it)` and the
+   FIX 154 line; world/textures/perf as in the FIX 154 checklist above (this NRO
+   contains both fixes — one run covers both).
+2. Optional dock/undock probe: put `gk_dk_resize.txt` on the card, dock/undock a few
+   times → `[dk] resized 1280x720 -> 1920x1080 (depth 1), <ms> ms`; image pool / tex
+   live must stay level across repeats (the leak fix), glow must still work, no
+   `[dk] resize ... FAILED`. This is plan P1.2b's Switch 1 arrival.
+3. Optional: `sdmc:/gk_sync_log.txt` for a power-off debugging session only (~6 ms
+   per log line while present).
+

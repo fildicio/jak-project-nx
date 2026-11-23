@@ -27,7 +27,11 @@ const std::vector<std::string> kPrograms = {
     "tfrag3",  // §7.0 D: GL TFragment (jak2 tfrag water)
     "etie", "etie_base",  // §7.0 E: GL Tie3AnotherCategory (jak2 tie trans/water)
     "glow_depth_copy", "glow_probe_on_grid", "glow_probe_downsample", "glow_draw",  // T126
-    "sprite_distort"};  // T127: GL Sprite3 distorter (jak2 scattergun heat haze)
+    "sprite_distort",  // T127: GL Sprite3 distorter (jak2 scattergun heat haze)
+    // FIX 138: BlitDisplays' end-of-frame effects (FullScreenTexDraw composite + color filter,
+    // SlowTimeEffect). The generator got them in FIX 138 but this list did not, so
+    // UniformTables failed at HEAD (26 tables vs 24 names). Synced during FIX 155 validation.
+    "simple_texture", "slow_time"};
 
 std::string read_generated(const std::string& prog, const std::string& stage) {
   return file_util::read_text_file(
